@@ -4,6 +4,8 @@ This directory contains release packaging assets for Agent Flows Bridge.
 
 Agent Flows Bridge uses calendar versions in the format `YYYY.MM.DD.XX`. Git tags are published as `vYYYY.MM.DD.XX`.
 
+The release script derives a semver-compatible internal version for Tauri and Cargo because those toolchains reject zero-padded calendar segments. The GitHub release tag, changelog, and Homebrew cask continue to use the canonical `YYYY.MM.DD.XX` version.
+
 ## Homebrew Cask
 
 The Homebrew cask template lives at:

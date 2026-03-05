@@ -6,6 +6,13 @@ Versioned as `YYYY.MM.DD.XX` where `XX` is a zero-padded integer increment each 
 
 ---
 
+
+## 2026.03.05.03
+
+### Changes
+
+- Switch Agent Flows Bridge to calendar versioning for shipped releases
+- Add tag-driven GitHub Actions publishing and launch checklist automation
 ## 2026.03.05.02
 
 ### Changes

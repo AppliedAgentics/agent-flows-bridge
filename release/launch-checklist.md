@@ -12,6 +12,7 @@ Use this checklist before announcing a public desktop release.
 ## Release Readiness
 
 - Confirm `main` is clean and the prepared release version is `YYYY.MM.DD.XX`
+- Confirm the internal Tauri/Cargo bundle version was regenerated from the same public release version
 - Confirm the changelog entry for that version is complete and user-facing
 - Confirm the release tag is created as `vYYYY.MM.DD.XX`
 - Confirm the GitHub Actions release workflow completed successfully

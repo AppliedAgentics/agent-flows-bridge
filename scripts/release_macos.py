@@ -52,6 +52,14 @@ def next_calendar_version(release_date: date, existing_versions: Sequence[str]) 
     return f"{prefix}{next_suffix:02d}"
 
 
+def cargo_compatible_version(version: str) -> str:
+    if not valid_calendar_version(version):
+        raise ValueError(f"Invalid release version: {version}")
+
+    year, month, day, sequence = version.split(".")
+    return f"{int(year)}.{int(month)}.{int(day)}+af{sequence}"
+
+
 def release_asset_url(repo_slug: str, version: str, asset_name: str) -> str:
     return f"https://github.com/{repo_slug}/releases/download/{release_tag(version)}/{asset_name}"
 
@@ -288,14 +296,16 @@ def prepare_release_metadata(
     if update_json_version_file(package_lock_path, version, dry_run, package_root_key="packages"):
         changed_paths.append(package_lock_path)
 
-    if update_json_version_file(tauri_conf_path, version, dry_run):
+    build_version = cargo_compatible_version(version)
+
+    if update_json_version_file(tauri_conf_path, build_version, dry_run):
         changed_paths.append(tauri_conf_path)
 
-    cargo_toml_text = update_cargo_toml_text(cargo_toml_path.read_text(), version)
+    cargo_toml_text = update_cargo_toml_text(cargo_toml_path.read_text(), build_version)
     if write_text_if_changed_or_preview(cargo_toml_path, cargo_toml_text, dry_run):
         changed_paths.append(cargo_toml_path)
 
-    cargo_lock_text = update_cargo_lock_text(cargo_lock_path.read_text(), version)
+    cargo_lock_text = update_cargo_lock_text(cargo_lock_path.read_text(), build_version)
     if write_text_if_changed_or_preview(cargo_lock_path, cargo_lock_text, dry_run):
         changed_paths.append(cargo_lock_path)
 

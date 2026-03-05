@@ -42,6 +42,11 @@ class ReleaseMacOSTests(unittest.TestCase):
 
         self.assertEqual(version, "2026.03.06.01")
 
+    def test_cargo_version_uses_semver_compatible_mapping(self):
+        cargo_version = release_macos.cargo_compatible_version("2026.03.05.03")
+
+        self.assertEqual(cargo_version, "2026.3.5+af03")
+
     def test_update_cask_rewrites_version_sha_and_urls(self):
         original = """
 # typed: strict
@@ -225,9 +230,9 @@ end
             self.assertIn(repo_dir / "CHANGELOG.md", changed_paths)
             self.assertIn('"version": "2026.03.05.03"', (repo_dir / "desktop" / "package.json").read_text())
             self.assertIn('"version": "2026.03.05.03"', (repo_dir / "desktop" / "package-lock.json").read_text())
-            self.assertIn('"version": "2026.03.05.03"', (repo_dir / "desktop" / "src-tauri" / "tauri.conf.json").read_text())
-            self.assertIn('version = "2026.03.05.03"', (repo_dir / "desktop" / "src-tauri" / "Cargo.toml").read_text())
-            self.assertIn('version = "2026.03.05.03"', (repo_dir / "desktop" / "src-tauri" / "Cargo.lock").read_text())
+            self.assertIn('"version": "2026.3.5+af03"', (repo_dir / "desktop" / "src-tauri" / "tauri.conf.json").read_text())
+            self.assertIn('version = "2026.3.5+af03"', (repo_dir / "desktop" / "src-tauri" / "Cargo.toml").read_text())
+            self.assertIn('version = "2026.3.5+af03"', (repo_dir / "desktop" / "src-tauri" / "Cargo.lock").read_text())
             self.assertIn("## 2026.03.05.03", (repo_dir / "CHANGELOG.md").read_text())
             self.assertIn("- Switch the desktop and cask versioning to calendar versions", (repo_dir / "CHANGELOG.md").read_text())
 

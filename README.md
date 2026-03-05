@@ -33,6 +33,8 @@ Agent Flows Bridge uses calendar versions in the format `YYYY.MM.DD.XX`.
 - Homebrew cask updates use the same version
 - `XX` is a zero-padded increment for releases prepared on the same day
 
+The Rust/Tauri toolchain requires semver-compatible bundle metadata, so the internal build version is derived from the public release version during release preparation. The public version remains the canonical version shown in the changelog, GitHub releases, and Homebrew cask.
+
 ## Requirements
 
 - An Agent Flows account
