@@ -43,21 +43,23 @@ This is the recommended install path for end users.
 
 ### Option 2: Homebrew
 
-Homebrew distribution depends on the Agent Flows Bridge cask being published to a tap.
+Install from the AppliedAgentics tap:
 
-The cask template shipped with this repo lives at `release/homebrew/agent-flows-bridge.rb`.
-Use the tap-specific install command provided by your release channel once that cask is published.
+```bash
+brew tap AppliedAgentics/tap
+brew install --cask agent-flows-bridge
+```
 
-Typical uninstall commands for a Homebrew-based install are:
+Homebrew uninstall:
 
 ```bash
 brew uninstall --cask agent-flows-bridge
 ```
 
-If your install instructions also required tapping a custom repository, remove that tap when you are done:
+Remove the tap if you no longer want to use it:
 
 ```bash
-brew untap <tap>
+brew untap AppliedAgentics/tap
 ```
 
 ## First-Time Setup
