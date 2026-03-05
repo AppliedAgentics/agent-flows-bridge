@@ -1,0 +1,14 @@
+.DS_Store
+
+AGENTS.md
+agent.md
+docs/
+templates/
+tickets/
+
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+release/*.zip
