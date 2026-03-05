@@ -6,6 +6,14 @@ Versioned as `YYYY.MM.DD.XX` where `XX` is a zero-padded integer increment each 
 
 ---
 
+## 2026.03.05.02 — 0.1.1 Release Preparation
+
+### Changes
+
+- Bump the desktop package, Tauri bundle, and Rust crate version metadata to `0.1.1`
+- Add the automated macOS release workflow used to build the app, publish the GitHub release asset, and update the Homebrew tap
+- Add release packaging documentation for the standalone bridge repository
+
 ## 2026.03.05.01 — Initial Standalone Bridge Release
 
 ### Changes
