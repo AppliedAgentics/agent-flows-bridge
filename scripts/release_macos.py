@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +18,8 @@ APP_BUNDLE_NAME = f"{PRODUCT_NAME}.app"
 DEFAULT_BRIDGE_REPO_SLUG = "AppliedAgentics/agent-flows-bridge"
 DEFAULT_TAP_REPO_SLUG = "AppliedAgentics/homebrew-tap"
 DEFAULT_TAP_NAME = "AppliedAgentics/tap"
+VERSION_PATTERN = re.compile(r"^\d{4}\.\d{2}\.\d{2}\.\d{2}$")
+CHANGELOG_HEADING_PATTERN = re.compile(r"^## (\d{4}\.\d{2}\.\d{2}\.\d{2})$")
 
 
 @dataclass(frozen=True)
@@ -29,8 +33,27 @@ def asset_name(version: str) -> str:
     return f"{PRODUCT_SLUG}-{version}-macos.zip"
 
 
+def release_tag(version: str) -> str:
+    return f"v{version}"
+
+
+def valid_calendar_version(version: str) -> bool:
+    return bool(VERSION_PATTERN.fullmatch(version))
+
+
+def next_calendar_version(release_date: date, existing_versions: Sequence[str]) -> str:
+    prefix = release_date.strftime("%Y.%m.%d.")
+    suffixes = [
+        int(version.rsplit(".", 1)[1])
+        for version in existing_versions
+        if valid_calendar_version(version) and version.startswith(prefix)
+    ]
+    next_suffix = max(suffixes, default=0) + 1
+    return f"{prefix}{next_suffix:02d}"
+
+
 def release_asset_url(repo_slug: str, version: str, asset_name: str) -> str:
-    return f"https://github.com/{repo_slug}/releases/download/v{version}/{asset_name}"
+    return f"https://github.com/{repo_slug}/releases/download/{release_tag(version)}/{asset_name}"
 
 
 def render_tap_readme(
@@ -103,7 +126,56 @@ def read_version(repo_dir: Path) -> str:
     return package_json["version"]
 
 
+def changelog_path(repo_dir: Path) -> Path:
+    return repo_dir / "CHANGELOG.md"
+
+
+def read_changelog(repo_dir: Path) -> str:
+    path = changelog_path(repo_dir)
+    return path.read_text() if path.exists() else ""
+
+
+def extract_changelog_versions(text: str) -> list[str]:
+    versions: list[str] = []
+
+    for line in text.splitlines():
+        match = CHANGELOG_HEADING_PATTERN.match(line.strip())
+        if match:
+            versions.append(match.group(1))
+
+    return versions
+
+
+def changelog_entry_body(text: str, version: str) -> str:
+    lines = text.splitlines()
+    heading = f"## {version}"
+    start_index = None
+
+    for index, line in enumerate(lines):
+        if line.strip() == heading:
+            start_index = index + 1
+            break
+
+    if start_index is None:
+        return ""
+
+    end_index = len(lines)
+    for index in range(start_index, len(lines)):
+        if index > start_index and lines[index].startswith("## "):
+            end_index = index
+            break
+
+    body_lines = lines[start_index:end_index]
+    body = "\n".join(body_lines).strip()
+    return body
+
+
 def default_release_notes(repo_dir: Path, version: str) -> str:
+    changelog_body = changelog_entry_body(read_changelog(repo_dir), version)
+
+    if changelog_body:
+        return f"## {PRODUCT_NAME} {version}\n\n{changelog_body}\n"
+
     return "\n".join(
         [
             f"## {PRODUCT_NAME} {version}",
@@ -122,6 +194,116 @@ def default_release_notes(repo_dir: Path, version: str) -> str:
 
 def release_notes_path(repo_dir: Path, version: str) -> Path:
     return repo_dir / "release" / f"release-notes-v{version}.md"
+
+
+def update_json_version_file(
+    path: Path,
+    version: str,
+    dry_run: bool,
+    package_root_key: str | None = None,
+) -> bool:
+    payload = json.loads(path.read_text())
+    payload["version"] = version
+
+    if package_root_key is not None:
+        package_root = payload.setdefault(package_root_key, {}).setdefault("", {})
+        package_root["version"] = version
+
+    return write_text_if_changed_or_preview(path, json.dumps(payload, indent=2) + "\n", dry_run)
+
+
+def update_cargo_toml_text(text: str, version: str) -> str:
+    return re.sub(r'^version = "[^"]+"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
+
+
+def update_cargo_lock_text(text: str, version: str) -> str:
+    pattern = r'(\[\[package\]\]\nname = "desktop"\nversion = ")[^"]+(")'
+    return re.sub(pattern, rf'\g<1>{version}\2', text, count=1)
+
+
+def changelog_entry_text(version: str, changes: Sequence[str]) -> str:
+    bullet_lines = [f"- {change}" for change in changes] or [f"- Prepare release {version}."]
+    bullets = "\n".join(bullet_lines)
+    return f"## {version}\n\n### Changes\n\n{bullets}\n"
+
+
+def prepend_changelog_entry(text: str, version: str, changes: Sequence[str]) -> str:
+    if f"## {version}" in text:
+        return text
+
+    separator = "\n---\n"
+    entry = f"\n\n{changelog_entry_text(version, changes)}"
+
+    if separator not in text:
+        return text.rstrip() + entry + "\n"
+
+    head, tail = text.split(separator, 1)
+    return f"{head}{separator}{entry}{tail.lstrip()}"
+
+
+def collect_existing_versions(repo_dir: Path) -> list[str]:
+    versions = set(extract_changelog_versions(read_changelog(repo_dir)))
+    current_version = read_version(repo_dir)
+
+    if valid_calendar_version(current_version):
+        versions.add(current_version)
+
+    result = subprocess.run(
+        ["git", "tag", "--list"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    for line in result.stdout.splitlines():
+        tag = line.strip()
+        version = tag[1:] if tag.startswith("v") else tag
+        if valid_calendar_version(version):
+            versions.add(version)
+
+    return sorted(versions)
+
+
+def prepare_release_metadata(
+    repo_dir: Path,
+    version: str,
+    changes: Sequence[str],
+    dry_run: bool,
+) -> list[Path]:
+    if not valid_calendar_version(version):
+        raise ValueError(f"Invalid release version: {version}")
+
+    changed_paths: list[Path] = []
+    package_json_path = repo_dir / "desktop" / "package.json"
+    package_lock_path = repo_dir / "desktop" / "package-lock.json"
+    tauri_conf_path = repo_dir / "desktop" / "src-tauri" / "tauri.conf.json"
+    cargo_toml_path = repo_dir / "desktop" / "src-tauri" / "Cargo.toml"
+    cargo_lock_path = repo_dir / "desktop" / "src-tauri" / "Cargo.lock"
+    changelog_file_path = changelog_path(repo_dir)
+
+    if update_json_version_file(package_json_path, version, dry_run):
+        changed_paths.append(package_json_path)
+
+    if update_json_version_file(package_lock_path, version, dry_run, package_root_key="packages"):
+        changed_paths.append(package_lock_path)
+
+    if update_json_version_file(tauri_conf_path, version, dry_run):
+        changed_paths.append(tauri_conf_path)
+
+    cargo_toml_text = update_cargo_toml_text(cargo_toml_path.read_text(), version)
+    if write_text_if_changed_or_preview(cargo_toml_path, cargo_toml_text, dry_run):
+        changed_paths.append(cargo_toml_path)
+
+    cargo_lock_text = update_cargo_lock_text(cargo_lock_path.read_text(), version)
+    if write_text_if_changed_or_preview(cargo_lock_path, cargo_lock_text, dry_run):
+        changed_paths.append(cargo_lock_path)
+
+    changelog_text = prepend_changelog_entry(read_changelog(repo_dir), version, changes)
+    if write_text_if_changed_or_preview(changelog_file_path, changelog_text, dry_run):
+        changed_paths.append(changelog_file_path)
+
+    return changed_paths
 
 
 def prepare_release_notes(
@@ -190,14 +372,14 @@ def plan_release_commands(
     plan.append(
         CommandStep(
             description="Publish the GitHub release asset.",
-            argv=(
-                "gh",
-                "release",
-                "create",
-                f"v{version}",
-                str(zip_path),
-                "--repo",
-                bridge_repo_slug,
+                argv=(
+                    "gh",
+                    "release",
+                    "create",
+                    release_tag(version),
+                    str(zip_path),
+                    "--repo",
+                    bridge_repo_slug,
                 "--target",
                 "main",
                 "--title",
@@ -227,6 +409,16 @@ def write_text_if_changed(path: Path, contents: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents)
     return True
+
+
+def write_text_if_changed_or_preview(path: Path, contents: str, dry_run: bool) -> bool:
+    if path.exists() and path.read_text() == contents:
+        return False
+
+    if dry_run:
+        return True
+
+    return write_text_if_changed(path, contents)
 
 
 def file_sha256(path: Path) -> str:
@@ -267,7 +459,7 @@ def ensure_clean_repo(repo_dir: Path) -> None:
 
 def release_exists(repo_slug: str, version: str) -> bool:
     result = subprocess.run(
-        ["gh", "release", "view", f"v{version}", "--repo", repo_slug],
+        ["gh", "release", "view", release_tag(version), "--repo", repo_slug],
         capture_output=True,
         text=True,
         check=False,
@@ -335,7 +527,7 @@ def publish_release(
             "gh",
             "release",
             "upload",
-            f"v{version}",
+            release_tag(version),
             str(asset_path),
             "--repo",
             repo_slug,
@@ -346,7 +538,7 @@ def publish_release(
             "gh",
             "release",
             "create",
-            f"v{version}",
+            release_tag(version),
             str(asset_path),
             "--repo",
             repo_slug,
@@ -372,8 +564,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tap-dir",
         type=Path,
-        required=True,
+        default=None,
         help="Path to the local AppliedAgentics homebrew tap clone.",
+    )
+    parser.add_argument(
+        "--prepare-release",
+        action="store_true",
+        help="Update the app version files and changelog to the next calendar version.",
     )
     parser.add_argument(
         "--bridge-repo-slug",
@@ -388,7 +585,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--version",
         default="",
-        help="Release version. Defaults to desktop/package.json version.",
+        help="Release version. Defaults to the next calendar version for prepare, or desktop/package.json for publish.",
+    )
+    parser.add_argument(
+        "--release-date",
+        default="",
+        help="Release date in YYYY-MM-DD for calendar version generation.",
+    )
+    parser.add_argument(
+        "--change",
+        action="append",
+        default=[],
+        help="Changelog bullet for a prepared release. Repeat for multiple bullets.",
     )
     parser.add_argument(
         "--release-notes-file",
@@ -413,8 +621,41 @@ def main() -> int:
     args = parse_args()
 
     repo_dir = args.repo_dir.resolve()
+
+    if args.prepare_release:
+        if not args.dry_run:
+            ensure_clean_repo(repo_dir)
+
+        release_date = date.fromisoformat(args.release_date) if args.release_date else date.today()
+        version = args.version or next_calendar_version(release_date, collect_existing_versions(repo_dir))
+        changed_paths = prepare_release_metadata(
+            repo_dir=repo_dir,
+            version=version,
+            changes=args.change,
+            dry_run=args.dry_run,
+        )
+
+        print(f"Prepared version: {version}")
+        if changed_paths:
+            print("Updated files:")
+            for path in changed_paths:
+                print(f"- {path}")
+        else:
+            print("No versioned files required changes.")
+
+        return 0
+
+    if args.tap_dir is None:
+        raise RuntimeError("--tap-dir is required unless --prepare-release is used")
+
     tap_dir = args.tap_dir.resolve()
     version = args.version or read_version(repo_dir)
+
+    if not valid_calendar_version(version):
+        raise RuntimeError(
+            f"Publish version must use YYYY.MM.DD.XX, got: {version}"
+        )
+
     asset_path = default_asset_path(repo_dir, version)
     bundle_path = default_app_bundle_path(repo_dir)
 

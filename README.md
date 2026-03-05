@@ -24,6 +24,15 @@ Use Agent Flows Bridge if:
 
 The current release target is macOS.
 
+## Versioning
+
+Agent Flows Bridge uses calendar versions in the format `YYYY.MM.DD.XX`.
+
+- App metadata uses `YYYY.MM.DD.XX`
+- GitHub releases are tagged as `vYYYY.MM.DD.XX`
+- Homebrew cask updates use the same version
+- `XX` is a zero-padded increment for releases prepared on the same day
+
 ## Requirements
 
 - An Agent Flows account

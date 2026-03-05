@@ -6,7 +6,7 @@ Versioned as `YYYY.MM.DD.XX` where `XX` is a zero-padded integer increment each 
 
 ---
 
-## 2026.03.05.02 — 0.1.1 Release Preparation
+## 2026.03.05.02
 
 ### Changes
 
