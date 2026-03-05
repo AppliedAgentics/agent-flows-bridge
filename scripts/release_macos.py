@@ -415,18 +415,19 @@ def main() -> int:
     repo_dir = args.repo_dir.resolve()
     tap_dir = args.tap_dir.resolve()
     version = args.version or read_version(repo_dir)
-    notes_path = prepare_release_notes(
-        repo_dir=repo_dir,
-        version=version,
-        explicit_path=args.release_notes_file,
-        dry_run=args.dry_run,
-    )
     asset_path = default_asset_path(repo_dir, version)
     bundle_path = default_app_bundle_path(repo_dir)
 
     if not args.dry_run:
         ensure_clean_repo(repo_dir)
         ensure_clean_repo(tap_dir)
+
+    notes_path = prepare_release_notes(
+        repo_dir=repo_dir,
+        version=version,
+        explicit_path=args.release_notes_file,
+        dry_run=args.dry_run,
+    )
 
     if args.dry_run:
         plan = plan_release_commands(

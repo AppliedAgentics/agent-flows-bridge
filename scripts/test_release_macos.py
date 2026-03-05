@@ -1,6 +1,8 @@
 import pathlib
 import tempfile
 import unittest
+from argparse import Namespace
+from unittest import mock
 
 from scripts import release_macos
 
@@ -118,6 +120,51 @@ end
 
             self.assertTrue(notes_path.exists())
             self.assertIn("## Agent Flows Bridge 0.2.0", notes_path.read_text())
+
+    def test_main_does_not_write_release_notes_before_clean_repo_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            repo_dir = root / "repo"
+            tap_dir = root / "tap"
+            (repo_dir / "desktop").mkdir(parents=True)
+            (tap_dir).mkdir(parents=True)
+
+            (repo_dir / "desktop" / "package.json").write_text('{"version":"0.2.0"}')
+
+            release_macos.subprocess.run(
+                ["git", "init"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            release_macos.subprocess.run(
+                ["git", "init"],
+                cwd=tap_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (repo_dir / "dirty.txt").write_text("dirty\n")
+
+            args = Namespace(
+                repo_dir=repo_dir,
+                tap_dir=tap_dir,
+                version="",
+                release_notes_file=None,
+                bridge_repo_slug=release_macos.DEFAULT_BRIDGE_REPO_SLUG,
+                tap_name=release_macos.DEFAULT_TAP_NAME,
+                skip_build=True,
+                dry_run=False,
+            )
+
+            with mock.patch.object(release_macos, "parse_args", return_value=args):
+                with self.assertRaises(RuntimeError):
+                    release_macos.main()
+
+            self.assertFalse(
+                (repo_dir / "release" / "release-notes-v0.2.0.md").exists()
+            )
 
 
 if __name__ == "__main__":
