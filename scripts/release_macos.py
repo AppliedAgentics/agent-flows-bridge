@@ -527,8 +527,12 @@ def bundle_verification_commands(bundle_path: Path, env: Mapping[str, str]) -> l
 
     signing_identity = env_value(env, "APPLE_SIGNING_IDENTITY")
     if signing_identity and signing_identity != "-":
+        bundled_bridge_path = bundle_path / "Contents" / "Resources" / "bridge" / PRODUCT_SLUG
+
         commands.extend(
             [
+                ("codesign", "-dv", "--verbose=4", str(bundled_bridge_path)),
+                ("codesign", "--verify", "--strict", "--verbose=4", str(bundled_bridge_path)),
                 ("spctl", "-a", "-vvv", "-t", "exec", str(bundle_path)),
                 ("xcrun", "stapler", "validate", str(bundle_path)),
             ]

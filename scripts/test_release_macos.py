@@ -117,6 +117,14 @@ class ReleaseMacOSTests(unittest.TestCase):
             "xcrun stapler validate /tmp/Agent Flows Bridge.app",
             rendered,
         )
+        self.assertIn(
+            "codesign -dv --verbose=4 /tmp/Agent Flows Bridge.app/Contents/Resources/bridge/agent-flows-bridge",
+            rendered,
+        )
+        self.assertIn(
+            "codesign --verify --strict --verbose=4 /tmp/Agent Flows Bridge.app/Contents/Resources/bridge/agent-flows-bridge",
+            rendered,
+        )
 
     def test_bundle_verification_commands_skip_gatekeeper_for_adhoc_signing(self):
         commands = release_macos.bundle_verification_commands(

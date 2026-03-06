@@ -6,6 +6,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../scripts/build_desktop_bridge_binary.py");
     println!("cargo:rerun-if-changed=../package.json");
     println!("cargo:rerun-if-changed=../../client/cmd/agent-flows-bridge/main.go");
+    println!("cargo:rerun-if-env-changed=APPLE_CERTIFICATE");
+    println!("cargo:rerun-if-env-changed=APPLE_CERTIFICATE_PASSWORD");
+    println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
 
     build_packaged_bridge_binary();
     tauri_build::build()
