@@ -7,6 +7,14 @@ Versioned as `YYYY.MM.DD.XX` where `XX` is a zero-padded integer increment each 
 ---
 
 
+## 2026.03.05.05
+
+### Changes
+
+- Bundle and sync the packaged bridge binary before desktop sign-in and status actions
+- Stop Tauri dev rebuild loops caused by generated bridge resources
+- Allow disconnect to clear local state when the refresh grant is already invalid
+- Fallback oversized bootstrap payload secrets to encrypted file storage when Keychain rejects large values
 ## 2026.03.05.04
 
 ### Changes
