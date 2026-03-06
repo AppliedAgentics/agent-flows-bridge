@@ -2,8 +2,8 @@
 # frozen_string_literal: true
 
 cask "agent-flows-bridge" do
-  version "2026.03.05.04"
-  sha256 "bf8db34103ba1ab57f911dfa09246d5e5963d2555c4b1c0a8304f66e043e9fc6"
+  version "2026.03.05.07"
+  sha256 "6cb8984d228434ea72459469733ee6be51d67777a3e1a617667655da2efd8212"
 
   url "https://github.com/AppliedAgentics/agent-flows-bridge/releases/download/v#{version}/agent-flows-bridge-#{version}-macos.zip"
   name "Agent Flows Bridge"
