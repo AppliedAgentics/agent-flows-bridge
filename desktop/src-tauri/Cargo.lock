@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "2026.3.5+af07"
+version = "2026.3.6+af01"
 dependencies = [
  "dirs 5.0.1",
  "serde",
