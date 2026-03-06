@@ -3,13 +3,19 @@ name: agent-flows-bridge-desktop
 on:
   pull_request:
     paths:
+      - "client/**"
       - "desktop/**"
+      - "scripts/build_desktop_bridge_binary.py"
+      - ".tool-versions"
       - ".github/workflows/agent-flows-bridge-desktop.yml"
   push:
     branches:
       - main
     paths:
+      - "client/**"
       - "desktop/**"
+      - "scripts/build_desktop_bridge_binary.py"
+      - ".tool-versions"
       - ".github/workflows/agent-flows-bridge-desktop.yml"
 
 jobs:
@@ -30,6 +36,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "client/go.mod"
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
