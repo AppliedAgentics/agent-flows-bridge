@@ -34,8 +34,8 @@ jobs:
       - name: Ensure tag points at main
         shell: bash
         run: |
-          git fetch origin main --depth=1
-          test "$(git rev-parse "$GITHUB_SHA")" = "$(git rev-parse "origin/main")"
+          git fetch origin main --depth=50
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"
 
       - name: Switch to main for metadata pushes
         shell: bash

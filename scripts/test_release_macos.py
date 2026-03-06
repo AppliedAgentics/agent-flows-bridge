@@ -114,6 +114,38 @@ end
             rendered,
         )
 
+    def test_publish_release_commands_create_when_release_missing(self):
+        commands = release_macos.publish_release_commands(
+            repo_slug="AppliedAgentics/agent-flows-bridge",
+            version="2026.03.05.03",
+            asset_path=pathlib.Path("/tmp/agent-flows-bridge-2026.03.05.03-macos.zip"),
+            notes_path=pathlib.Path("/tmp/release-notes.md"),
+            release_already_exists=False,
+        )
+
+        rendered = [" ".join(command) for command in commands]
+
+        self.assertEqual(len(rendered), 1)
+        self.assertIn("gh release create v2026.03.05.03", rendered[0])
+        self.assertIn("--notes-file /tmp/release-notes.md", rendered[0])
+
+    def test_publish_release_commands_edit_and_upload_when_release_exists(self):
+        commands = release_macos.publish_release_commands(
+            repo_slug="AppliedAgentics/agent-flows-bridge",
+            version="2026.03.05.03",
+            asset_path=pathlib.Path("/tmp/agent-flows-bridge-2026.03.05.03-macos.zip"),
+            notes_path=pathlib.Path("/tmp/release-notes.md"),
+            release_already_exists=True,
+        )
+
+        rendered = [" ".join(command) for command in commands]
+
+        self.assertEqual(len(rendered), 2)
+        self.assertIn("gh release edit v2026.03.05.03", rendered[0])
+        self.assertIn("--notes-file /tmp/release-notes.md", rendered[0])
+        self.assertIn("gh release upload v2026.03.05.03", rendered[1])
+        self.assertIn("--clobber", rendered[1])
+
     def test_default_release_notes_uses_matching_changelog_entry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_dir = pathlib.Path(temp_dir)

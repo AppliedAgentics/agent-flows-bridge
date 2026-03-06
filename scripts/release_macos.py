@@ -524,27 +524,41 @@ def commit_and_push_if_changed(repo_dir: Path, message: str, dry_run: bool) -> N
     run_command(("git", "push"), repo_dir, dry_run)
 
 
-def publish_release(
-    repo_dir: Path,
+def publish_release_commands(
     repo_slug: str,
     version: str,
     asset_path: Path,
     notes_path: Path,
-    dry_run: bool,
-) -> None:
-    if release_exists(repo_slug, version):
-        argv = (
-            "gh",
-            "release",
-            "upload",
-            release_tag(version),
-            str(asset_path),
-            "--repo",
-            repo_slug,
-            "--clobber",
-        )
-    else:
-        argv = (
+    release_already_exists: bool,
+) -> list[tuple[str, ...]]:
+    if release_already_exists:
+        return [
+            (
+                "gh",
+                "release",
+                "edit",
+                release_tag(version),
+                "--repo",
+                repo_slug,
+                "--title",
+                release_tag(version),
+                "--notes-file",
+                str(notes_path),
+            ),
+            (
+                "gh",
+                "release",
+                "upload",
+                release_tag(version),
+                str(asset_path),
+                "--repo",
+                repo_slug,
+                "--clobber",
+            ),
+        ]
+
+    return [
+        (
             "gh",
             "release",
             "create",
@@ -555,12 +569,31 @@ def publish_release(
             "--target",
             "main",
             "--title",
-            f"v{version}",
+            release_tag(version),
             "--notes-file",
             str(notes_path),
         )
+    ]
 
-    run_command(argv, repo_dir, dry_run)
+
+def publish_release(
+    repo_dir: Path,
+    repo_slug: str,
+    version: str,
+    asset_path: Path,
+    notes_path: Path,
+    dry_run: bool,
+) -> None:
+    commands = publish_release_commands(
+        repo_slug=repo_slug,
+        version=version,
+        asset_path=asset_path,
+        notes_path=notes_path,
+        release_already_exists=release_exists(repo_slug, version),
+    )
+
+    for command in commands:
+        run_command(command, repo_dir, dry_run)
 
 
 def parse_args() -> argparse.Namespace:
