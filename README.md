@@ -63,6 +63,24 @@ brew install --cask agent-flows-bridge
 
 Homebrew releases are intended to ship as signed, notarized macOS app bundles.
 
+## Update
+
+If Agent Flows Bridge is already installed through Homebrew, update it with:
+
+```bash
+brew update
+brew upgrade --cask agent-flows-bridge
+```
+
+Verify the installed version after the upgrade:
+
+```bash
+brew info --cask agent-flows-bridge
+defaults read "/Applications/Agent Flows Bridge.app/Contents/Info" CFBundleShortVersionString
+```
+
+Use `brew install --cask agent-flows-bridge` only for the first install on a machine. Use `brew upgrade --cask agent-flows-bridge` for existing installs.
+
 Homebrew uninstall:
 
 ```bash
