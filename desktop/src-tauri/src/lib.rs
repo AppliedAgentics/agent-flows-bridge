@@ -464,7 +464,8 @@ fn ensure_packaged_bridge_binary_ready(
     paths: &BridgePaths,
 ) -> Result<(), String> {
     let bundled_binary_path = resolve_packaged_bridge_binary_path(app_handle)?;
-    sync_packaged_bridge_binary(paths, &bundled_binary_path)
+    sync_packaged_bridge_binary(paths, &bundled_binary_path)?;
+    ensure_default_bridge_config_ready(paths)
 }
 
 // Copy the packaged bridge binary into the state directory when needed.
@@ -603,6 +604,7 @@ where
     F: FnOnce(&str) -> Result<(), String>,
 {
     sync_packaged_bridge_binary(paths, bundled_binary_path)?;
+    ensure_default_bridge_config_ready(paths)?;
 
     if !paths.binary_path.exists() {
         return Err(format!(
@@ -657,6 +659,64 @@ where
     };
 
     Ok(result)
+}
+
+// Write the default bridge config file on first launch.
+//
+// Fresh Homebrew installs do not have `~/.agent-flows-bridge/config/bridge.json`
+// yet. The desktop shell owns that first-run provisioning step so sign-in can
+// succeed without a prior CLI install flow.
+//
+// Returns `Ok(())` when the config exists or is written successfully.
+fn ensure_default_bridge_config_ready(paths: &BridgePaths) -> Result<(), String> {
+    if paths.config_path.exists() {
+        return Ok(());
+    }
+
+    let config_parent = paths
+        .config_path
+        .parent()
+        .ok_or_else(|| "resolve bridge config parent directory".to_string())?;
+    fs::create_dir_all(config_parent).map_err(|error| {
+        format!(
+            "create bridge config directory at {}: {error}",
+            config_parent.to_string_lossy()
+        )
+    })?;
+
+    let encoded_config = render_default_bridge_config(paths)?;
+    fs::write(&paths.config_path, encoded_config).map_err(|error| {
+        format!(
+            "write bridge config at {}: {error}",
+            paths.config_path.to_string_lossy()
+        )
+    })
+}
+
+// Render the default JSON config used by the packaged bridge binary.
+//
+// The desktop shell mirrors the bridge CLI defaults so it can provision
+// `bridge.json` before the first OAuth flow on a clean machine.
+//
+// Returns the pretty-printed config bytes with a trailing newline.
+fn render_default_bridge_config(paths: &BridgePaths) -> Result<Vec<u8>, String> {
+    let home_dir = dirs::home_dir().ok_or_else(|| "resolve home directory".to_string())?;
+    let openclaw_data_dir = home_dir.join(".openclaw");
+
+    let config = serde_json::json!({
+        "api_base_url": "https://agentflows.appliedagentics.ai",
+        "runtime_url": "http://127.0.0.1:18789",
+        "state_dir": paths.state_dir.to_string_lossy().into_owned(),
+        "openclaw_data_dir": openclaw_data_dir.to_string_lossy().into_owned(),
+        "log_level": "info",
+        "oauth_client_id": "agent-flows-bridge",
+        "transport_mode": "auto"
+    });
+
+    let mut encoded = serde_json::to_vec_pretty(&config)
+        .map_err(|error| format!("encode default bridge config: {error}"))?;
+    encoded.push(b'\n');
+    Ok(encoded)
 }
 
 fn write_http_response(
@@ -1144,9 +1204,10 @@ mod tests {
     use super::{
         authorize_and_connect_with_paths_and_browser, binary_file_name,
         clear_local_state_on_exit_with_state_dir, default_state_dir,
-        forget_runtime_binding_with_state_dir, parse_request_path, parse_tray_menu_action,
-        sanitize_bridge_stderr, sync_packaged_bridge_binary,
-        wait_for_callback_and_open_with_browser, BridgePaths, TrayMenuAction,
+        ensure_default_bridge_config_ready, forget_runtime_binding_with_state_dir,
+        parse_request_path, parse_tray_menu_action, sanitize_bridge_stderr,
+        sync_packaged_bridge_binary, wait_for_callback_and_open_with_browser, BridgePaths,
+        TrayMenuAction,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1277,6 +1338,53 @@ mod tests {
         let binary_name = binary_file_name();
         assert!(binary_name.starts_with("agent-flows-bridge"));
         assert!(binary_name.ends_with(std::env::consts::EXE_SUFFIX));
+    }
+
+    #[test]
+    fn ensure_default_bridge_config_ready_writes_first_run_config() {
+        let temp_dir = unique_temp_dir("af-bridge-tauri-config-test");
+        let state_dir = temp_dir.join(".agent-flows-bridge");
+        let config_path = state_dir.join("config").join("bridge.json");
+        let binary_path = state_dir.join("bin").join(binary_file_name());
+
+        let paths = BridgePaths {
+            state_dir: state_dir.clone(),
+            config_path: config_path.clone(),
+            binary_path,
+        };
+
+        ensure_default_bridge_config_ready(&paths).expect("write default bridge config");
+
+        let config_raw = fs::read_to_string(&config_path).expect("read default bridge config");
+        let payload: serde_json::Value =
+            serde_json::from_str(&config_raw).expect("parse default bridge config");
+
+        assert_eq!(
+            payload.get("api_base_url").and_then(|value| value.as_str()),
+            Some("https://agentflows.appliedagentics.ai")
+        );
+        assert_eq!(
+            payload.get("runtime_url").and_then(|value| value.as_str()),
+            Some("http://127.0.0.1:18789")
+        );
+        assert_eq!(
+            payload.get("state_dir").and_then(|value| value.as_str()),
+            Some(state_dir.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            payload
+                .get("oauth_client_id")
+                .and_then(|value| value.as_str()),
+            Some("agent-flows-bridge")
+        );
+        assert_eq!(
+            payload
+                .get("transport_mode")
+                .and_then(|value| value.as_str()),
+            Some("auto")
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1694,6 +1802,80 @@ mod tests {
             invocation_lines.get(3).copied(),
             Some("-oauth-redirect-port")
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn authorize_and_connect_creates_missing_config_before_oauth_start() {
+        let temp_dir = unique_temp_dir("af-bridge-tauri-authorize-config-test");
+        let state_dir = temp_dir.join(".agent-flows-bridge");
+        let bin_dir = state_dir.join("bin");
+        let resource_dir = temp_dir.join("resources").join("bridge");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::create_dir_all(&resource_dir).expect("create resource dir");
+
+        let installed_binary_path = bin_dir.join(binary_file_name());
+        fs::write(&installed_binary_path, "#!/bin/sh\necho stale\n").expect("write stale binary");
+        make_executable(&installed_binary_path);
+
+        let packaged_invocation_path = temp_dir.join("packaged-config.invocation");
+        let packaged_binary_path = resource_dir.join(binary_file_name());
+        let packaged_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nprintf -- '--\\n' >> \"{}\"\nif [ \"$3\" = \"-oauth-start\" ]; then\n  printf '{{\"authorize_url\":\"https://agentflows.example.test/oauth/bridge/sign-in?callback_port=%s\",\"redirect_uri\":\"http://127.0.0.1:%s/oauth/callback\",\"state\":\"state-123\"}}\\n' \"$5\" \"$5\"\nelif [ \"$3\" = \"-oauth-complete-callback-url\" ]; then\n  printf '{{\"connector_id\":7,\"runtime_id\":98,\"runtime_kind\":\"local_connector\",\"scope\":\"connector:bootstrap connector:webhook\"}}\\n'\nelse\n  printf '{{}}\\n'\nfi\n",
+            packaged_invocation_path.to_string_lossy(),
+            packaged_invocation_path.to_string_lossy(),
+        );
+        fs::write(&packaged_binary_path, packaged_script).expect("write packaged binary");
+        make_executable(&packaged_binary_path);
+
+        let config_path = state_dir.join("config").join("bridge.json");
+        let paths = BridgePaths {
+            state_dir: state_dir.clone(),
+            config_path: config_path.clone(),
+            binary_path: installed_binary_path.clone(),
+        };
+
+        let result = authorize_and_connect_with_paths_and_browser(
+            &paths,
+            &packaged_binary_path,
+            |authorize_url| {
+                let parsed_url = url::Url::parse(authorize_url).expect("parse authorize url");
+                let callback_port = parsed_url
+                    .query_pairs()
+                    .find_map(|(key, value)| (key == "callback_port").then(|| value.into_owned()))
+                    .expect("callback port query param");
+                let port = callback_port.parse::<u16>().expect("parse callback port");
+                spawn_http_request(
+                    port,
+                    "GET /oauth/callback?code=abc&state=state-123 HTTP/1.1\r\n\r\n",
+                );
+                Ok(())
+            },
+        )
+        .expect("authorize and connect");
+
+        assert_eq!(result.connector_id, 7);
+        assert!(config_path.exists());
+
+        let config_raw = fs::read_to_string(&config_path).expect("read created bridge config");
+        let payload: serde_json::Value =
+            serde_json::from_str(&config_raw).expect("parse created bridge config");
+        assert_eq!(
+            payload.get("state_dir").and_then(|value| value.as_str()),
+            Some(state_dir.to_string_lossy().as_ref())
+        );
+
+        let invocation_raw =
+            fs::read_to_string(&packaged_invocation_path).expect("read packaged invocation args");
+        let invocation_lines: Vec<&str> = invocation_raw.lines().collect();
+        assert_eq!(invocation_lines.first().copied(), Some("-config"));
+        assert_eq!(
+            invocation_lines.get(1).copied(),
+            Some(config_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(invocation_lines.get(2).copied(), Some("-oauth-start"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
