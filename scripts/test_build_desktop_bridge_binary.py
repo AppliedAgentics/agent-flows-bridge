@@ -35,32 +35,65 @@ class BuildDesktopBridgeBinaryTests(unittest.TestCase):
 
         self.assertIsNone(config)
 
-    def test_signing_commands_enable_timestamp_and_hardened_runtime(self):
-        config = build_desktop_bridge_binary.ReleaseSigningConfig(
-            certificate_base64="encoded-certificate",
-            certificate_password="certificate-password",
-            signing_identity="Developer ID Application: Applied Agentics, Inc. (TEAMID1234)",
+    def test_parse_codesign_identity_reference_prefers_matching_identity_label(self):
+        identity_reference = build_desktop_bridge_binary.parse_codesign_identity_reference(
+            '\n'.join(
+                [
+                    '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Developer ID Application: Wrong Team (TEAMID0000)"',
+                    '  2) E658F359E336D09F147678CFDBF02815B6676D46 "Developer ID Application: Applied Agentics, Inc. (TEAMID1234)"',
+                    '     2 valid identities found',
+                ]
+            ),
+            "Developer ID Application: Applied Agentics, Inc. (TEAMID1234)",
         )
 
-        commands = build_desktop_bridge_binary.signing_commands(
+        self.assertEqual(identity_reference, "E658F359E336D09F147678CFDBF02815B6676D46")
+
+    def test_parse_codesign_identity_reference_falls_back_to_first_identity(self):
+        identity_reference = build_desktop_bridge_binary.parse_codesign_identity_reference(
+            '\n'.join(
+                [
+                    '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "***"',
+                    '     1 valid identities found',
+                ]
+            ),
+            "Developer ID Application: Applied Agentics, Inc. (TEAMID1234)",
+        )
+
+        self.assertEqual(identity_reference, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+    def test_codesign_command_enables_timestamp_and_hardened_runtime(self):
+        command = build_desktop_bridge_binary.codesign_command(
             binary_path=pathlib.Path("/tmp/agent-flows-bridge"),
-            certificate_path=pathlib.Path("/tmp/developer-id.p12"),
             keychain_path=pathlib.Path("/tmp/bridge-signing.keychain-db"),
-            keychain_password="temporary-keychain-password",
-            config=config,
+            signing_identity_reference="E658F359E336D09F147678CFDBF02815B6676D46",
         )
 
-        rendered = [" ".join(command) for command in commands]
-
         self.assertIn(
-            "security import /tmp/developer-id.p12 -k /tmp/bridge-signing.keychain-db -P certificate-password -T /usr/bin/codesign -T /usr/bin/security",
-            rendered,
+            "--timestamp",
+            command,
         )
         self.assertIn(
-            "security set-key-partition-list -S apple-tool:,apple: -s -k temporary-keychain-password /tmp/bridge-signing.keychain-db",
-            rendered,
+            "--options",
+            command,
         )
         self.assertIn(
-            "codesign --force --sign Developer ID Application: Applied Agentics, Inc. (TEAMID1234) --keychain /tmp/bridge-signing.keychain-db --timestamp --options runtime --verbose=4 /tmp/agent-flows-bridge",
-            rendered,
+            "runtime",
+            command,
+        )
+        self.assertEqual(
+            command,
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                "E658F359E336D09F147678CFDBF02815B6676D46",
+                "--keychain",
+                "/tmp/bridge-signing.keychain-db",
+                "--timestamp",
+                "--options",
+                "runtime",
+                "--verbose=4",
+                "/tmp/agent-flows-bridge",
+            ],
         )

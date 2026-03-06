@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import platform
+import re
 import secrets
 import subprocess
 import tempfile
@@ -18,6 +19,9 @@ class ReleaseSigningConfig:
     certificate_base64: str
     certificate_password: str
     signing_identity: str
+
+
+IDENTITY_LINE_PATTERN = re.compile(r'^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"$', re.MULTILINE)
 
 
 def repo_root() -> Path:
@@ -86,56 +90,74 @@ def run_command(command: list[str], cwd: Path, env: Mapping[str, str] | None = N
     subprocess.run(command, cwd=cwd, env=dict(env) if env is not None else None, check=True)
 
 
-def signing_commands(
+def capture_command(
+    command: list[str],
+    cwd: Path,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=dict(env) if env is not None else None,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def parse_codesign_identity_reference(identity_output: str, preferred_identity: str) -> str:
+    matches = IDENTITY_LINE_PATTERN.findall(identity_output)
+
+    if not matches:
+        raise RuntimeError("No valid codesigning identity found in imported keychain.")
+
+    for fingerprint, label in matches:
+        if label == preferred_identity:
+            return fingerprint
+
+    return matches[0][0]
+
+
+def parse_keychain_paths(output: str) -> list[str]:
+    paths: list[str] = []
+
+    for line in output.splitlines():
+        stripped = line.strip().strip('"')
+        if stripped:
+            paths.append(stripped)
+
+    return paths
+
+
+def current_user_keychains(cwd: Path) -> list[str]:
+    output = capture_command(["security", "list-keychains", "-d", "user"], cwd)
+    return parse_keychain_paths(output)
+
+
+def current_default_keychain(cwd: Path) -> str | None:
+    output = capture_command(["security", "default-keychain", "-d", "user"], cwd)
+    paths = parse_keychain_paths(output)
+    return paths[0] if paths else None
+
+
+def codesign_command(
     binary_path: Path,
-    certificate_path: Path,
     keychain_path: Path,
-    keychain_password: str,
-    config: ReleaseSigningConfig,
-) -> list[list[str]]:
+    signing_identity_reference: str,
+) -> list[str]:
     return [
-        ["security", "create-keychain", "-p", keychain_password, str(keychain_path)],
-        ["security", "set-keychain-settings", "-lut", "21600", str(keychain_path)],
-        ["security", "unlock-keychain", "-p", keychain_password, str(keychain_path)],
-        [
-            "security",
-            "import",
-            str(certificate_path),
-            "-k",
-            str(keychain_path),
-            "-P",
-            config.certificate_password,
-            "-T",
-            "/usr/bin/codesign",
-            "-T",
-            "/usr/bin/security",
-        ],
-        [
-            "security",
-            "set-key-partition-list",
-            "-S",
-            "apple-tool:,apple:",
-            "-s",
-            "-k",
-            keychain_password,
-            str(keychain_path),
-        ],
-        ["security", "find-identity", "-v", "-p", "codesigning", str(keychain_path)],
-        [
-            "codesign",
-            "--force",
-            "--sign",
-            config.signing_identity,
-            "--keychain",
-            str(keychain_path),
-            "--timestamp",
-            "--options",
-            "runtime",
-            "--verbose=4",
-            str(binary_path),
-        ],
-        ["codesign", "-dv", "--verbose=4", str(binary_path)],
-        ["codesign", "--verify", "--strict", "--verbose=4", str(binary_path)],
+        "codesign",
+        "--force",
+        "--sign",
+        signing_identity_reference,
+        "--keychain",
+        str(keychain_path),
+        "--timestamp",
+        "--options",
+        "runtime",
+        "--verbose=4",
+        str(binary_path),
     ]
 
 
@@ -159,20 +181,69 @@ def sign_packaged_binary(
         certificate_path = temp_dir / "developer-id.p12"
         keychain_path = temp_dir / "agent-flows-bridge-signing.keychain-db"
         keychain_password = secrets.token_urlsafe(24)
+        existing_keychains = current_user_keychains(repo_dir)
+        default_keychain = current_default_keychain(repo_dir)
 
         certificate_path.write_bytes(base64.b64decode(config.certificate_base64))
         certificate_path.chmod(0o600)
 
         try:
-            for command in signing_commands(
-                binary_path=binary_path,
-                certificate_path=certificate_path,
-                keychain_path=keychain_path,
-                keychain_password=keychain_password,
-                config=config,
-            ):
-                run_command(command, repo_dir)
+            run_command(["security", "create-keychain", "-p", keychain_password, str(keychain_path)], repo_dir)
+            run_command(["security", "set-keychain-settings", "-lut", "21600", str(keychain_path)], repo_dir)
+            run_command(["security", "unlock-keychain", "-p", keychain_password, str(keychain_path)], repo_dir)
+            run_command(
+                [
+                    "security",
+                    "import",
+                    str(certificate_path),
+                    "-k",
+                    str(keychain_path),
+                    "-P",
+                    config.certificate_password,
+                    "-T",
+                    "/usr/bin/codesign",
+                    "-T",
+                    "/usr/bin/security",
+                ],
+                repo_dir,
+            )
+            run_command(
+                [
+                    "security",
+                    "set-key-partition-list",
+                    "-S",
+                    "apple-tool:,apple:",
+                    "-s",
+                    "-k",
+                    keychain_password,
+                    str(keychain_path),
+                ],
+                repo_dir,
+            )
+
+            updated_keychains = [str(keychain_path), *existing_keychains]
+            run_command(["security", "list-keychains", "-d", "user", "-s", *updated_keychains], repo_dir)
+            run_command(["security", "default-keychain", "-d", "user", "-s", str(keychain_path)], repo_dir)
+
+            identity_output = capture_command(
+                ["security", "find-identity", "-v", "-p", "codesigning", str(keychain_path)],
+                repo_dir,
+            )
+            signing_identity_reference = parse_codesign_identity_reference(
+                identity_output,
+                config.signing_identity,
+            )
+
+            run_command(codesign_command(binary_path, keychain_path, signing_identity_reference), repo_dir)
+            run_command(["codesign", "-dv", "--verbose=4", str(binary_path)], repo_dir)
+            run_command(["codesign", "--verify", "--strict", "--verbose=4", str(binary_path)], repo_dir)
         finally:
+            if existing_keychains:
+                run_command(["security", "list-keychains", "-d", "user", "-s", *existing_keychains], repo_dir)
+
+            if default_keychain:
+                run_command(["security", "default-keychain", "-d", "user", "-s", default_keychain], repo_dir)
+
             delete_temp_keychain(keychain_path, repo_dir)
 
 
