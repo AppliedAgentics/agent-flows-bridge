@@ -47,6 +47,90 @@ class ReleaseMacOSTests(unittest.TestCase):
 
         self.assertEqual(cargo_version, "2026.3.5+af03")
 
+    def test_notarization_mode_detects_api_key_credentials(self):
+        mode = release_macos.notarization_mode(
+            {
+                "APPLE_API_ISSUER": "issuer",
+                "APPLE_API_KEY": "key-id",
+                "APPLE_API_KEY_PATH": "/tmp/AuthKey_key-id.p8",
+            }
+        )
+
+        self.assertEqual(mode, "api-key")
+
+    def test_notarization_mode_detects_apple_id_credentials(self):
+        mode = release_macos.notarization_mode(
+            {
+                "APPLE_ID": "ci@example.com",
+                "APPLE_PASSWORD": "app-specific-password",
+                "APPLE_TEAM_ID": "TEAMID1234",
+            }
+        )
+
+        self.assertEqual(mode, "apple-id")
+
+    def test_release_environment_errors_require_developer_id_and_notarization(self):
+        errors = release_macos.release_environment_errors(
+            {
+                "APPLE_CERTIFICATE": "encoded-certificate",
+                "APPLE_CERTIFICATE_PASSWORD": "password",
+                "APPLE_SIGNING_IDENTITY": "-",
+            }
+        )
+
+        self.assertIn(
+            "APPLE_SIGNING_IDENTITY must be a Developer ID Application identity for public releases.",
+            errors,
+        )
+        self.assertTrue(
+            any("Missing notarization credentials." in error for error in errors),
+            errors,
+        )
+
+    def test_ensure_release_environment_passes_for_api_key_credentials(self):
+        release_macos.ensure_release_environment(
+            {
+                "APPLE_CERTIFICATE": "encoded-certificate",
+                "APPLE_CERTIFICATE_PASSWORD": "password",
+                "APPLE_SIGNING_IDENTITY": "Developer ID Application: Applied Agentics, Inc. (TEAMID1234)",
+                "APPLE_API_ISSUER": "issuer",
+                "APPLE_API_KEY": "key-id",
+                "APPLE_API_KEY_PATH": "/tmp/AuthKey_key-id.p8",
+            }
+        )
+
+    def test_bundle_verification_commands_require_gatekeeper_and_stapler_for_distribution_build(self):
+        commands = release_macos.bundle_verification_commands(
+            pathlib.Path("/tmp/Agent Flows Bridge.app"),
+            {
+                "APPLE_SIGNING_IDENTITY": "Developer ID Application: Applied Agentics, Inc. (TEAMID1234)",
+            },
+        )
+
+        rendered = [" ".join(command) for command in commands]
+
+        self.assertIn(
+            "spctl -a -vvv -t exec /tmp/Agent Flows Bridge.app",
+            rendered,
+        )
+        self.assertIn(
+            "xcrun stapler validate /tmp/Agent Flows Bridge.app",
+            rendered,
+        )
+
+    def test_bundle_verification_commands_skip_gatekeeper_for_adhoc_signing(self):
+        commands = release_macos.bundle_verification_commands(
+            pathlib.Path("/tmp/Agent Flows Bridge.app"),
+            {
+                "APPLE_SIGNING_IDENTITY": "-",
+            },
+        )
+
+        rendered = [" ".join(command) for command in commands]
+
+        self.assertFalse(any(command.startswith("spctl ") for command in rendered), rendered)
+        self.assertFalse(any(command.startswith("xcrun stapler") for command in rendered), rendered)
+
     def test_update_cask_rewrites_version_sha_and_urls(self):
         original = """
 # typed: strict

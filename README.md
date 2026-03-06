@@ -61,6 +61,8 @@ brew tap AppliedAgentics/tap
 brew install --cask agent-flows-bridge
 ```
 
+Homebrew releases are intended to ship as signed, notarized macOS app bundles.
+
 Homebrew uninstall:
 
 ```bash

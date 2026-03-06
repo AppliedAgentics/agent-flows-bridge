@@ -45,6 +45,8 @@ The publish workflow runs on tag pushes matching `vYYYY.MM.DD.XX`.
 It will:
 
 - build the macOS Tauri app bundle
+- require Developer ID signing and notarization credentials before publishing
+- verify the signed bundle with `codesign`, `spctl`, and `xcrun stapler`
 - package the `.app` into a release zip
 - compute the new SHA256
 - create or update the GitHub release asset
@@ -53,11 +55,23 @@ It will:
 
 ### Required GitHub Secret
 
-The workflow needs a repository or organization secret named `HOMEBREW_TAP_PUSH_TOKEN`.
+The workflow needs these repository or organization secrets:
 
-That token must have write access to:
+- `APPLE_CERTIFICATE`
+- `APPLE_CERTIFICATE_PASSWORD`
+- `APPLE_SIGNING_IDENTITY`
+- `APPLE_API_ISSUER`
+- `APPLE_API_KEY`
+- `APPLE_API_KEY_P8_BASE64`
+- `HOMEBREW_TAP_PUSH_TOKEN`
+
+The Homebrew tap token must have write access to:
 
 - `AppliedAgentics/homebrew-tap`
+
+For the Apple setup, follow:
+
+- `macos-signing-and-notarization-setup.md`
 
 ## Safe Preview
 

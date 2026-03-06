@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 PRODUCT_NAME = "Agent Flows Bridge"
@@ -20,6 +21,21 @@ DEFAULT_TAP_REPO_SLUG = "AppliedAgentics/homebrew-tap"
 DEFAULT_TAP_NAME = "AppliedAgentics/tap"
 VERSION_PATTERN = re.compile(r"^\d{4}\.\d{2}\.\d{2}\.\d{2}$")
 CHANGELOG_HEADING_PATTERN = re.compile(r"^## (\d{4}\.\d{2}\.\d{2}\.\d{2})$")
+REQUIRED_SIGNING_ENV_VARS = (
+    "APPLE_CERTIFICATE",
+    "APPLE_CERTIFICATE_PASSWORD",
+    "APPLE_SIGNING_IDENTITY",
+)
+API_KEY_NOTARIZATION_ENV_VARS = (
+    "APPLE_API_ISSUER",
+    "APPLE_API_KEY",
+    "APPLE_API_KEY_PATH",
+)
+APPLE_ID_NOTARIZATION_ENV_VARS = (
+    "APPLE_ID",
+    "APPLE_PASSWORD",
+    "APPLE_TEAM_ID",
+)
 
 
 @dataclass(frozen=True)
@@ -454,6 +470,83 @@ def run_command(argv: Sequence[str], cwd: Path, dry_run: bool) -> None:
     subprocess.run(argv, cwd=cwd, check=True)
 
 
+def env_value(env: Mapping[str, str], key: str) -> str:
+    return env.get(key, "").strip()
+
+
+def missing_env_keys(env: Mapping[str, str], keys: Sequence[str]) -> list[str]:
+    return [key for key in keys if not env_value(env, key)]
+
+
+def notarization_mode(env: Mapping[str, str]) -> str | None:
+    if not missing_env_keys(env, API_KEY_NOTARIZATION_ENV_VARS):
+        return "api-key"
+
+    if not missing_env_keys(env, APPLE_ID_NOTARIZATION_ENV_VARS):
+        return "apple-id"
+
+    return None
+
+
+def release_environment_errors(env: Mapping[str, str]) -> list[str]:
+    errors: list[str] = []
+
+    for key in missing_env_keys(env, REQUIRED_SIGNING_ENV_VARS):
+        errors.append(f"Missing required signing variable: {key}")
+
+    signing_identity = env_value(env, "APPLE_SIGNING_IDENTITY")
+    if signing_identity == "-":
+        errors.append("APPLE_SIGNING_IDENTITY must be a Developer ID Application identity for public releases.")
+
+    if notarization_mode(env) is None:
+        errors.append(
+            "Missing notarization credentials. Provide either "
+            "APPLE_API_ISSUER, APPLE_API_KEY, and APPLE_API_KEY_PATH or "
+            "APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID."
+        )
+
+    return errors
+
+
+def ensure_release_environment(env: Mapping[str, str]) -> None:
+    errors = release_environment_errors(env)
+
+    if errors:
+        bullet_list = "\n".join(f"- {error}" for error in errors)
+        raise RuntimeError(
+            "Missing macOS release signing/notarization configuration:\n"
+            f"{bullet_list}"
+        )
+
+
+def bundle_verification_commands(bundle_path: Path, env: Mapping[str, str]) -> list[tuple[str, ...]]:
+    commands: list[tuple[str, ...]] = [
+        ("codesign", "-dv", "--verbose=4", str(bundle_path)),
+        ("codesign", "--verify", "--deep", "--strict", "--verbose=4", str(bundle_path)),
+    ]
+
+    signing_identity = env_value(env, "APPLE_SIGNING_IDENTITY")
+    if signing_identity and signing_identity != "-":
+        commands.extend(
+            [
+                ("spctl", "-a", "-vvv", "-t", "exec", str(bundle_path)),
+                ("xcrun", "stapler", "validate", str(bundle_path)),
+            ]
+        )
+
+    return commands
+
+
+def verify_release_bundle(
+    repo_dir: Path,
+    bundle_path: Path,
+    env: Mapping[str, str],
+    dry_run: bool,
+) -> None:
+    for command in bundle_verification_commands(bundle_path, env):
+        run_command(command, repo_dir, dry_run)
+
+
 def status_entries(status_output: str) -> list[str]:
     return [line for line in status_output.splitlines() if line.strip()]
 
@@ -754,6 +847,7 @@ def main() -> int:
         ignored_repo_paths = [tap_dir] if tap_dir.is_relative_to(repo_dir) else []
         ensure_clean_repo(repo_dir, ignored_paths=ignored_repo_paths)
         ensure_clean_repo(tap_dir)
+        ensure_release_environment(os.environ)
 
     notes_path = prepare_release_notes(
         repo_dir=repo_dir,
@@ -782,6 +876,8 @@ def main() -> int:
 
     if not args.skip_build:
         run_command(("npm", "run", "tauri", "build", "--", "--bundles", "app"), repo_dir / "desktop", dry_run=False)
+
+    verify_release_bundle(repo_dir, bundle_path, os.environ, dry_run=False)
 
     asset_path.parent.mkdir(parents=True, exist_ok=True)
     run_command(
