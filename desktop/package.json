@@ -4,6 +4,7 @@
   "version": "2026.03.05.04",
   "type": "module",
   "scripts": {
+    "build-bridge": "python3 ../scripts/build_desktop_bridge_binary.py",
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",

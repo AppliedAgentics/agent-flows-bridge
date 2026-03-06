@@ -667,20 +667,51 @@ func (c *Client) ReportWebhookResult(
 
 // DisconnectConnector revoke active connector access for the stored session.
 //
-// Uses the stored OAuth access token to call the connector disconnect endpoint,
-// which revokes the connector and all active connector sessions server-side.
+// Uses the stored OAuth access token to call the connector disconnect endpoint
+// first. If the server rejects that token as unauthorized, it refreshes once
+// and retries the revoke request.
 //
 // Returns DisconnectResult or an error.
 func (c *Client) DisconnectConnector(ctx context.Context) (DisconnectResult, error) {
-	session, err := c.LoadFreshSession(ctx, 5*time.Minute)
+	session, err := c.LoadStoredSession(ctx)
 	if err != nil {
 		return DisconnectResult{}, err
 	}
 
 	if strings.TrimSpace(session.AccessToken) == "" {
-		return DisconnectResult{}, fmt.Errorf("stored session missing access token")
+		session, err = c.LoadFreshSession(ctx, 5*time.Minute)
+		if err != nil {
+			return DisconnectResult{}, err
+		}
 	}
 
+	result, err := c.executeDisconnectRequest(ctx, session.AccessToken)
+	if err == nil {
+		return result, nil
+	}
+
+	if !disconnectErrorRequiresRefresh(err) {
+		return DisconnectResult{}, err
+	}
+
+	refreshedSession, err := c.RefreshSession(ctx)
+	if err != nil {
+		return DisconnectResult{}, err
+	}
+
+	return c.executeDisconnectRequest(ctx, refreshedSession.AccessToken)
+}
+
+// Execute the connector disconnect request with the supplied access token.
+//
+// Sends the revoke request to the SaaS connector endpoint and validates the
+// structured success response payload.
+//
+// Returns DisconnectResult or an error.
+func (c *Client) executeDisconnectRequest(
+	ctx context.Context,
+	accessToken string,
+) (DisconnectResult, error) {
 	disconnectURL := c.apiBaseURL + "/api/connectors/disconnect"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, disconnectURL, strings.NewReader("{}"))
 	if err != nil {
@@ -689,7 +720,7 @@ func (c *Client) DisconnectConnector(ctx context.Context) (DisconnectResult, err
 
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	request.Header.Set("Authorization", "Bearer "+accessToken)
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
@@ -720,6 +751,21 @@ func (c *Client) DisconnectConnector(ctx context.Context) (DisconnectResult, err
 	}
 
 	return result, nil
+}
+
+// Decide whether a disconnect failure should trigger one refresh retry.
+//
+// Only authentication failures should retry with a fresh access token. Other
+// API errors are returned directly to preserve the server's original response.
+//
+// Returns true when the disconnect request should be retried after refresh.
+func disconnectErrorRequiresRefresh(err error) bool {
+	var apiError *APIError
+	if !errors.As(err, &apiError) {
+		return false
+	}
+
+	return apiError.StatusCode == http.StatusUnauthorized || apiError.StatusCode == http.StatusForbidden
 }
 
 func (c *Client) exchangeAuthorizationCode(

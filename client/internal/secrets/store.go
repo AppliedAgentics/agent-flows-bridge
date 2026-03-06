@@ -24,6 +24,9 @@ var ErrNotFound = errors.New("secret not found")
 // ErrInvalidKey indicates a secret key contains unsupported characters.
 var ErrInvalidKey = errors.New("invalid secret key")
 
+// ErrValueTooLarge indicates a backend cannot store the provided secret bytes.
+var ErrValueTooLarge = errors.New("secret value too large")
+
 // Store provide secret persistence operations.
 type Store interface {
 	Name() string
@@ -280,7 +283,25 @@ func (m *migratingStore) Metadata() Metadata {
 }
 
 func (m *migratingStore) Save(ctx context.Context, key string, value []byte) error {
-	return m.primary.Save(ctx, key, value)
+	primaryErr := m.primary.Save(ctx, key, value)
+	if primaryErr == nil {
+		return nil
+	}
+
+	if !errors.Is(primaryErr, ErrValueTooLarge) || m.legacy == nil {
+		return primaryErr
+	}
+
+	if err := m.legacy.Save(ctx, key, value); err != nil {
+		return err
+	}
+
+	deleteErr := m.primary.Delete(ctx, key)
+	if deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+		return deleteErr
+	}
+
+	return nil
 }
 
 func (m *migratingStore) Load(ctx context.Context, key string) ([]byte, error) {
@@ -302,6 +323,10 @@ func (m *migratingStore) Load(ctx context.Context, key string) ([]byte, error) {
 	}
 
 	if saveErr := m.primary.Save(ctx, key, legacyValue); saveErr != nil {
+		if errors.Is(saveErr, ErrValueTooLarge) {
+			return legacyValue, nil
+		}
+
 		return nil, saveErr
 	}
 	if deleteErr := m.legacy.Delete(ctx, key); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {

@@ -539,6 +539,75 @@ func TestDisconnectConnectorRevokesConnector(t *testing.T) {
 	}
 }
 
+func TestDisconnectConnectorUsesStoredAccessTokenBeforeRefresh(t *testing.T) {
+	ctx := context.Background()
+	store, err := secrets.NewStore(secrets.Options{StateDir: t.TempDir(), PreferredBackend: "file"})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	refreshCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			refreshCalls++
+			w.WriteHeader(http.StatusBadRequest)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"error":"invalid_grant"}`)
+		case "/api/connectors/disconnect":
+			if got := r.Header.Get("Authorization"); got != "Bearer at_123" {
+				t.Fatalf("unexpected authorization header: %s", got)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"data":{"revoked":true,"connector_id":55}}`)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Options{
+		APIBaseURL:    server.URL,
+		OAuthClientID: "agent-flows-bridge",
+		DeviceName:    "Sid MacBook Pro",
+		Platform:      "macos",
+		RedirectPort:  49200,
+		SecretStore:   store,
+	})
+
+	session := Session{
+		AccessToken:  "at_123",
+		RefreshToken: "rt_123",
+		TokenType:    "Bearer",
+		ExpiresIn:    3600,
+		Scope:        "connector:heartbeat connector:webhook",
+		ConnectorID:  55,
+		RuntimeID:    77,
+		RuntimeKind:  "local_connector",
+		IssuedAt:     time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second),
+	}
+
+	if err := client.persistSession(ctx, session); err != nil {
+		t.Fatalf("persist session: %v", err)
+	}
+
+	result, err := client.DisconnectConnector(ctx)
+	if err != nil {
+		t.Fatalf("disconnect connector: %v", err)
+	}
+
+	if !result.Revoked {
+		t.Fatalf("expected revoked=true, got %+v", result)
+	}
+	if result.ConnectorID != 55 {
+		t.Fatalf("expected connector id 55, got %d", result.ConnectorID)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("expected disconnect to avoid refresh, got %d refresh calls", refreshCalls)
+	}
+}
+
 func TestDisconnectConnectorReturnsErrorForFailedRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := secrets.NewStore(secrets.Options{StateDir: t.TempDir(), PreferredBackend: "file"})
@@ -547,9 +616,9 @@ func TestDisconnectConnectorReturnsErrorForFailedRequest(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
+		w.WriteHeader(http.StatusInternalServerError)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"error":"invalid_token"}`)
+		_, _ = fmt.Fprintf(w, `{"error":"server_error"}`)
 	}))
 	defer server.Close()
 
@@ -584,6 +653,96 @@ func TestDisconnectConnectorReturnsErrorForFailedRequest(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "disconnect request failed") {
 		t.Fatalf("expected disconnect request failed error, got %v", err)
+	}
+}
+
+func TestDisconnectConnectorRefreshesAndRetriesWhenAccessTokenIsUnauthorized(t *testing.T) {
+	ctx := context.Background()
+	store, err := secrets.NewStore(secrets.Options{StateDir: t.TempDir(), PreferredBackend: "file"})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	disconnectCalls := 0
+	refreshCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/connectors/disconnect":
+			disconnectCalls++
+			switch got := r.Header.Get("Authorization"); got {
+			case "Bearer at_old":
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"error":"invalid_token"}`)
+			case "Bearer at_new":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"data":{"revoked":true,"connector_id":55}}`)
+			default:
+				t.Fatalf("unexpected authorization header: %s", got)
+			}
+		case "/oauth/token":
+			refreshCalls++
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			if r.Form.Get("grant_type") != "refresh_token" {
+				t.Fatalf("unexpected grant_type: %s", r.Form.Get("grant_type"))
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"access_token":"at_new","token_type":"Bearer","expires_in":3600,"refresh_token":"rt_new","scope":"connector:heartbeat connector:webhook","connector_id":55}`)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Options{
+		APIBaseURL:    server.URL,
+		OAuthClientID: "agent-flows-bridge",
+		DeviceName:    "Sid MacBook Pro",
+		Platform:      "macos",
+		RedirectPort:  49200,
+		SecretStore:   store,
+	})
+
+	session := Session{
+		AccessToken:  "at_old",
+		RefreshToken: "rt_old",
+		TokenType:    "Bearer",
+		ExpiresIn:    3600,
+		Scope:        "connector:heartbeat connector:webhook",
+		ConnectorID:  55,
+		RuntimeID:    77,
+		RuntimeKind:  "local_connector",
+		IssuedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+
+	if err := client.persistSession(ctx, session); err != nil {
+		t.Fatalf("persist session: %v", err)
+	}
+
+	result, err := client.DisconnectConnector(ctx)
+	if err != nil {
+		t.Fatalf("disconnect connector: %v", err)
+	}
+
+	if !result.Revoked {
+		t.Fatalf("expected revoked=true, got %+v", result)
+	}
+	if disconnectCalls != 2 {
+		t.Fatalf("expected two disconnect calls, got %d", disconnectCalls)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("expected one refresh call, got %d", refreshCalls)
+	}
+
+	storedSession, err := client.LoadStoredSession(ctx)
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	if storedSession.AccessToken != "at_new" || storedSession.RefreshToken != "rt_new" {
+		t.Fatalf("expected rotated stored session, got %+v", storedSession)
 	}
 }
 

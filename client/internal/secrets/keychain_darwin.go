@@ -38,6 +38,10 @@ func (k *keychainStore) Save(_ context.Context, key string, value []byte) error 
 	}
 
 	if err := keyring.Set(k.serviceName, sanitizedKey, string(value)); err != nil {
+		if isKeychainValueTooLarge(err) {
+			return ErrValueTooLarge
+		}
+
 		return fmt.Errorf("save keychain secret: %w", err)
 	}
 
@@ -77,4 +81,18 @@ func (k *keychainStore) Delete(_ context.Context, key string) error {
 	}
 
 	return nil
+}
+
+// Check whether a Keychain write error indicates the secret payload is too large.
+//
+// The go-keyring macOS backend surfaces the security CLI stderr text, so this
+// check matches the stable "too big" message instead of a typed error.
+//
+// Returns true when the secret should fall back to another backend.
+func isKeychainValueTooLarge(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "too big")
 }

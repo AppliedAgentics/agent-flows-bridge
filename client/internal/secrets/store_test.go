@@ -97,6 +97,51 @@ func TestMigratingStoreLoadsLegacyValueAndDeletesLegacyCopy(t *testing.T) {
 	}
 }
 
+func TestMigratingStoreFallsBackToLegacyWhenPrimarySecretIsTooLarge(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newFakeStore("keychain")
+	primaryStore.saveErr = ErrValueTooLarge
+	legacyStore := newFakeStore("file")
+
+	store := newMigratingStore(primaryStore, legacyStore)
+
+	if err := store.Save(ctx, "connector_bootstrap_payload", []byte("large-bootstrap")); err != nil {
+		t.Fatalf("save oversized secret: %v", err)
+	}
+
+	if _, ok := primaryStore.values["connector_bootstrap_payload"]; ok {
+		t.Fatalf("expected oversized secret to stay out of primary store, got %+v", primaryStore.values)
+	}
+	if string(legacyStore.values["connector_bootstrap_payload"]) != "large-bootstrap" {
+		t.Fatalf("expected oversized secret in legacy store, got %+v", legacyStore.values)
+	}
+}
+
+func TestMigratingStoreKeepsLegacyValueWhenPrimaryRejectsMigrationForLargeSecret(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newFakeStore("keychain")
+	primaryStore.saveErr = ErrValueTooLarge
+	legacyStore := newFakeStore("file")
+	legacyStore.values["connector_bootstrap_payload"] = []byte("large-bootstrap")
+
+	store := newMigratingStore(primaryStore, legacyStore)
+
+	loaded, err := store.Load(ctx, "connector_bootstrap_payload")
+	if err != nil {
+		t.Fatalf("load oversized secret: %v", err)
+	}
+
+	if string(loaded) != "large-bootstrap" {
+		t.Fatalf("unexpected loaded secret: %q", string(loaded))
+	}
+	if _, ok := primaryStore.values["connector_bootstrap_payload"]; ok {
+		t.Fatalf("expected oversized secret to remain out of primary store, got %+v", primaryStore.values)
+	}
+	if string(legacyStore.values["connector_bootstrap_payload"]) != "large-bootstrap" {
+		t.Fatalf("expected oversized secret to remain in legacy store, got %+v", legacyStore.values)
+	}
+}
+
 func TestFileStoreSaveLoadDelete(t *testing.T) {
 	store, err := NewStore(Options{StateDir: t.TempDir(), PreferredBackend: "file"})
 	if err != nil {
@@ -189,8 +234,9 @@ func TestFileStoreEncryptsPayloadAtRest(t *testing.T) {
 }
 
 type fakeStore struct {
-	name   string
-	values map[string][]byte
+	name    string
+	values  map[string][]byte
+	saveErr error
 }
 
 func newFakeStore(name string) *fakeStore {
@@ -206,6 +252,10 @@ func (f *fakeStore) Metadata() Metadata {
 }
 
 func (f *fakeStore) Save(_ context.Context, key string, value []byte) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+
 	f.values[key] = append([]byte(nil), value...)
 	return nil
 }

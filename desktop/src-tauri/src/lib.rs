@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -138,6 +139,7 @@ const TRAY_MENU_QUIT_ID: &str = "quit-app";
 const TRAY_EVENT_SIGN_IN: &str = "bridge://tray-sign-in";
 const TRAY_EVENT_REFRESH_STATUS: &str = "bridge://tray-refresh-status";
 const TRAY_EVENT_FORGET_RUNTIME: &str = "bridge://tray-forget-runtime";
+const BUNDLED_BRIDGE_RESOURCE_DIR: &str = "bridge";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayMenuAction {
@@ -149,47 +151,18 @@ enum TrayMenuAction {
 }
 
 #[tauri::command]
-fn bridge_status(state_dir: Option<String>) -> Result<BridgeStatus, String> {
+fn bridge_status(app_handle: AppHandle, state_dir: Option<String>) -> Result<BridgeStatus, String> {
     let paths = BridgePaths::resolve(state_dir)?;
+    let sync_result = ensure_packaged_bridge_binary_ready(&app_handle, &paths);
     let config_exists = paths.config_path.exists();
     let binary_exists = paths.binary_path.exists();
 
-    if !config_exists || !binary_exists {
-        let status = BridgeStatus {
-            state_dir: paths.state_dir.to_string_lossy().into_owned(),
-            config_path: paths.config_path.to_string_lossy().into_owned(),
-            binary_path: paths.binary_path.to_string_lossy().into_owned(),
-            config_exists,
-            binary_exists,
-            connected: false,
-            connector_id: None,
-            runtime_id: None,
-            runtime_kind: None,
-            scope: None,
-            bootstrap_ready: false,
-            bootstrap_runtime_id: None,
-            bootstrap_fetched_at: None,
-            bootstrap_error: None,
-            bootstrap_applied: false,
-            bootstrap_applied_at: None,
-            bootstrap_apply_error: None,
-            openclaw_data_dir: None,
-            openclaw_config_path: None,
-            openclaw_env_path: None,
-            runtime_binding_present: false,
-            runtime_binding_runtime_id: None,
-            runtime_binding_runtime_kind: None,
-            runtime_binding_flow_id: None,
-            runtime_binding_updated_at: None,
-            secrets_backend: None,
-            secrets_warning: None,
-            bridge_version: None,
-            bridge_commit: None,
-            bridge_build_date: None,
-            desktop_version: env!("CARGO_PKG_VERSION").to_string(),
-            error: Some("bridge install incomplete".to_string()),
+    if !config_exists || !binary_exists || sync_result.is_err() {
+        let error_message = match sync_result.err() {
+            Some(sync_error) => sync_error,
+            None => "bridge install incomplete".to_string(),
         };
-
+        let status = incomplete_bridge_status(&paths, config_exists, binary_exists, error_message);
         return Ok(status);
     }
 
@@ -241,66 +214,27 @@ fn bridge_status(state_dir: Option<String>) -> Result<BridgeStatus, String> {
 }
 
 #[tauri::command]
-fn forget_runtime_binding(state_dir: Option<String>) -> Result<ForgetRuntimeResult, String> {
+fn forget_runtime_binding(
+    app_handle: AppHandle,
+    state_dir: Option<String>,
+) -> Result<ForgetRuntimeResult, String> {
+    let paths = BridgePaths::resolve(state_dir.clone())?;
+    ensure_packaged_bridge_binary_ready(&app_handle, &paths)?;
     forget_runtime_binding_with_state_dir(state_dir)?;
     Ok(ForgetRuntimeResult { cleared: true })
 }
 
 #[tauri::command]
-async fn authorize_and_connect(state_dir: Option<String>) -> Result<AuthorizeResult, String> {
+async fn authorize_and_connect(
+    app_handle: AppHandle,
+    state_dir: Option<String>,
+) -> Result<AuthorizeResult, String> {
     let handle = tauri::async_runtime::spawn_blocking(move || {
         let paths = BridgePaths::resolve(state_dir)?;
-        if !paths.binary_path.exists() {
-            return Err(format!(
-                "bridge binary not found at {}",
-                paths.binary_path.to_string_lossy()
-            ));
-        }
-        if !paths.config_path.exists() {
-            return Err(format!(
-                "bridge config not found at {}",
-                paths.config_path.to_string_lossy()
-            ));
-        }
-
-        let listener = bind_oauth_callback_listener()?;
-        let callback_port = listener
-            .local_addr()
-            .map_err(|error| format!("read callback listener address: {error}"))?
-            .port();
-
-        let start_args = vec![
-            "-config".to_string(),
-            paths.config_path.to_string_lossy().into_owned(),
-            "-oauth-start".to_string(),
-            "-oauth-redirect-port".to_string(),
-            callback_port.to_string(),
-        ];
-        let start_payload = run_bridge_json::<OAuthStartPayload>(&paths, &start_args)?;
-
-        let callback_url = wait_for_callback_and_open(
-            listener,
-            &start_payload.authorize_url,
-            &start_payload.redirect_uri,
-            &start_payload.state,
-        )?;
-
-        let complete_args = vec![
-            "-config".to_string(),
-            paths.config_path.to_string_lossy().into_owned(),
-            "-oauth-complete-callback-url".to_string(),
-            callback_url.clone(),
-        ];
-        let complete_payload = run_bridge_json::<OAuthCompletePayload>(&paths, &complete_args)?;
-
-        let result = AuthorizeResult {
-            callback_url,
-            connector_id: complete_payload.connector_id,
-            runtime_id: complete_payload.runtime_id,
-            runtime_kind: complete_payload.runtime_kind,
-            scope: complete_payload.scope,
-        };
-        Ok(result)
+        let bundled_binary_path = resolve_packaged_bridge_binary_path(&app_handle)?;
+        authorize_and_connect_with_paths_and_browser(&paths, &bundled_binary_path, |url| {
+            webbrowser::open(url).map_err(|error| format!("open browser: {error}"))
+        })
     });
 
     handle
@@ -323,21 +257,6 @@ fn bind_oauth_callback_listener() -> Result<TcpListener, String> {
     }
 
     Err("bind callback listener on 127.0.0.1:49200-49210: no free port".to_string())
-}
-
-fn wait_for_callback_and_open(
-    listener: TcpListener,
-    authorize_url: &str,
-    redirect_uri: &str,
-    expected_state: &str,
-) -> Result<String, String> {
-    wait_for_callback_and_open_with_browser(
-        listener,
-        authorize_url,
-        redirect_uri,
-        expected_state,
-        |url| webbrowser::open(url).map_err(|error| format!("open browser: {error}")),
-    )
 }
 
 fn wait_for_callback_and_open_with_browser<F>(
@@ -428,6 +347,316 @@ where
     }
 
     Err("timed out waiting for oauth callback on localhost".to_string())
+}
+
+// Build a disconnected status payload for missing or unsynced bridge state.
+//
+// Uses resolved state paths and file existence flags to populate the desktop
+// shell with actionable error details before any bridge command can run.
+//
+// Returns a disconnected `BridgeStatus` with the provided error message.
+fn incomplete_bridge_status(
+    paths: &BridgePaths,
+    config_exists: bool,
+    binary_exists: bool,
+    error_message: String,
+) -> BridgeStatus {
+    BridgeStatus {
+        state_dir: paths.state_dir.to_string_lossy().into_owned(),
+        config_path: paths.config_path.to_string_lossy().into_owned(),
+        binary_path: paths.binary_path.to_string_lossy().into_owned(),
+        config_exists,
+        binary_exists,
+        connected: false,
+        connector_id: None,
+        runtime_id: None,
+        runtime_kind: None,
+        scope: None,
+        bootstrap_ready: false,
+        bootstrap_runtime_id: None,
+        bootstrap_fetched_at: None,
+        bootstrap_error: None,
+        bootstrap_applied: false,
+        bootstrap_applied_at: None,
+        bootstrap_apply_error: None,
+        openclaw_data_dir: None,
+        openclaw_config_path: None,
+        openclaw_env_path: None,
+        runtime_binding_present: false,
+        runtime_binding_runtime_id: None,
+        runtime_binding_runtime_kind: None,
+        runtime_binding_flow_id: None,
+        runtime_binding_updated_at: None,
+        secrets_backend: None,
+        secrets_warning: None,
+        bridge_version: None,
+        bridge_commit: None,
+        bridge_build_date: None,
+        desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+        error: Some(error_message),
+    }
+}
+
+// Resolve the packaged bridge binary path from the app bundle or dev resources.
+//
+// Checks the bundled app resource directory first, then falls back to the repo
+// `src-tauri/resources` directory used by local development and tests.
+//
+// Returns the packaged bridge binary path or an error with all attempted paths.
+fn resolve_packaged_bridge_binary_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidate_paths = Vec::new();
+
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        candidate_paths.push(
+            resource_dir
+                .join(BUNDLED_BRIDGE_RESOURCE_DIR)
+                .join(binary_file_name()),
+        );
+        candidate_paths.push(
+            resource_dir
+                .join("resources")
+                .join(BUNDLED_BRIDGE_RESOURCE_DIR)
+                .join(binary_file_name()),
+        );
+    }
+
+    candidate_paths.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("resolve desktop dir")
+            .join("generated-resources")
+            .join(BUNDLED_BRIDGE_RESOURCE_DIR)
+            .join(binary_file_name()),
+    );
+
+    candidate_paths.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BUNDLED_BRIDGE_RESOURCE_DIR)
+            .join(binary_file_name()),
+    );
+
+    for candidate_path in &candidate_paths {
+        if candidate_path.exists() {
+            return Ok(candidate_path.clone());
+        }
+    }
+
+    let checked_paths = candidate_paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(format!(
+        "bundled bridge binary not found; checked {checked_paths}"
+    ))
+}
+
+// Sync the packaged bridge binary into the user state directory.
+//
+// Copies the bundled bridge binary into `~/.agent-flows-bridge/bin/` when the
+// installed binary is missing or differs from the packaged bytes.
+//
+// Returns `Ok(())` when the binary is ready, or an error if the copy fails.
+fn ensure_packaged_bridge_binary_ready(
+    app_handle: &AppHandle,
+    paths: &BridgePaths,
+) -> Result<(), String> {
+    let bundled_binary_path = resolve_packaged_bridge_binary_path(app_handle)?;
+    sync_packaged_bridge_binary(paths, &bundled_binary_path)
+}
+
+// Copy the packaged bridge binary into the state directory when needed.
+//
+// Compares the installed and bundled file bytes to avoid unnecessary writes.
+// When they differ, writes a temporary file, applies executable permissions,
+// and atomically replaces the installed binary.
+//
+// Returns `Ok(())` when the installed bridge binary matches the bundled copy.
+fn sync_packaged_bridge_binary(
+    paths: &BridgePaths,
+    bundled_binary_path: &Path,
+) -> Result<(), String> {
+    let bundled_contents = fs::read(bundled_binary_path).map_err(|error| {
+        format!(
+            "read bundled bridge binary at {}: {error}",
+            bundled_binary_path.to_string_lossy()
+        )
+    })?;
+
+    if let Ok(existing_contents) = fs::read(&paths.binary_path) {
+        if existing_contents == bundled_contents {
+            return Ok(());
+        }
+    }
+
+    let binary_parent = paths
+        .binary_path
+        .parent()
+        .ok_or_else(|| "resolve bridge binary parent directory".to_string())?;
+    fs::create_dir_all(binary_parent).map_err(|error| {
+        format!(
+            "create bridge binary directory at {}: {error}",
+            binary_parent.to_string_lossy()
+        )
+    })?;
+
+    let temp_binary_path = binary_parent.join(format!(
+        "{}.tmp",
+        paths
+            .binary_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    ));
+    fs::write(&temp_binary_path, &bundled_contents).map_err(|error| {
+        format!(
+            "write synced bridge binary at {}: {error}",
+            temp_binary_path.to_string_lossy()
+        )
+    })?;
+    apply_packaged_binary_permissions(bundled_binary_path, &temp_binary_path)?;
+
+    if paths.binary_path.exists() {
+        fs::remove_file(&paths.binary_path).map_err(|error| {
+            format!(
+                "remove stale bridge binary at {}: {error}",
+                paths.binary_path.to_string_lossy()
+            )
+        })?;
+    }
+
+    fs::rename(&temp_binary_path, &paths.binary_path).map_err(|error| {
+        format!(
+            "replace bridge binary at {}: {error}",
+            paths.binary_path.to_string_lossy()
+        )
+    })?;
+
+    Ok(())
+}
+
+// Apply packaged executable permissions to the synced state-dir binary.
+//
+// Mirrors the bundled file mode on Unix so the copied bridge binary remains
+// runnable after sync. Non-Unix platforms rely on default file semantics.
+//
+// Returns `Ok(())` when permissions are ready.
+#[cfg(unix)]
+fn apply_packaged_binary_permissions(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_permissions = fs::metadata(source_path)
+        .map_err(|error| {
+            format!(
+                "read bundled bridge binary permissions at {}: {error}",
+                source_path.to_string_lossy()
+            )
+        })?
+        .permissions();
+
+    let mut target_permissions = fs::metadata(target_path)
+        .map_err(|error| {
+            format!(
+                "read synced bridge binary permissions at {}: {error}",
+                target_path.to_string_lossy()
+            )
+        })?
+        .permissions();
+    target_permissions.set_mode(source_permissions.mode());
+
+    fs::set_permissions(target_path, target_permissions).map_err(|error| {
+        format!(
+            "set synced bridge binary permissions at {}: {error}",
+            target_path.to_string_lossy()
+        )
+    })
+}
+
+// Apply packaged executable permissions to the synced state-dir binary.
+//
+// Non-Unix platforms do not require explicit permission updates after copying.
+//
+// Returns `Ok(())`.
+#[cfg(not(unix))]
+fn apply_packaged_binary_permissions(
+    _source_path: &Path,
+    _target_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
+// Run the full desktop OAuth flow after ensuring the packaged bridge binary is installed.
+//
+// Syncs the packaged bridge binary into the user state dir, starts OAuth with
+// the dynamic callback port, waits for the localhost callback, and completes
+// connector authorization.
+//
+// Returns `Ok(AuthorizeResult)` or an error string.
+fn authorize_and_connect_with_paths_and_browser<F>(
+    paths: &BridgePaths,
+    bundled_binary_path: &Path,
+    open_browser: F,
+) -> Result<AuthorizeResult, String>
+where
+    F: FnOnce(&str) -> Result<(), String>,
+{
+    sync_packaged_bridge_binary(paths, bundled_binary_path)?;
+
+    if !paths.binary_path.exists() {
+        return Err(format!(
+            "bridge binary not found at {}",
+            paths.binary_path.to_string_lossy()
+        ));
+    }
+    if !paths.config_path.exists() {
+        return Err(format!(
+            "bridge config not found at {}",
+            paths.config_path.to_string_lossy()
+        ));
+    }
+
+    let listener = bind_oauth_callback_listener()?;
+    let callback_port = listener
+        .local_addr()
+        .map_err(|error| format!("read callback listener address: {error}"))?
+        .port();
+
+    let start_args = vec![
+        "-config".to_string(),
+        paths.config_path.to_string_lossy().into_owned(),
+        "-oauth-start".to_string(),
+        "-oauth-redirect-port".to_string(),
+        callback_port.to_string(),
+    ];
+    let start_payload = run_bridge_json::<OAuthStartPayload>(paths, &start_args)?;
+
+    let callback_url = wait_for_callback_and_open_with_browser(
+        listener,
+        &start_payload.authorize_url,
+        &start_payload.redirect_uri,
+        &start_payload.state,
+        open_browser,
+    )?;
+
+    let complete_args = vec![
+        "-config".to_string(),
+        paths.config_path.to_string_lossy().into_owned(),
+        "-oauth-complete-callback-url".to_string(),
+        callback_url.clone(),
+    ];
+    let complete_payload = run_bridge_json::<OAuthCompletePayload>(paths, &complete_args)?;
+
+    let result = AuthorizeResult {
+        callback_url,
+        connector_id: complete_payload.connector_id,
+        runtime_id: complete_payload.runtime_id,
+        runtime_kind: complete_payload.runtime_kind,
+        scope: complete_payload.scope,
+    };
+
+    Ok(result)
 }
 
 fn write_http_response(
@@ -741,7 +970,9 @@ fn forget_runtime_binding_with_state_dir(state_dir_override: Option<String>) -> 
 // Returns true when the disconnect error is safe to ignore.
 fn disconnect_error_is_safe_to_ignore(error_message: &str) -> bool {
     let normalized = error_message.to_ascii_lowercase();
-    normalized.contains("invalid_connector_token") || normalized.contains("connector_revoked")
+    normalized.contains("invalid_connector_token")
+        || normalized.contains("connector_revoked")
+        || normalized.contains("invalid_grant")
 }
 
 fn disconnect_runtime_with_paths(paths: &BridgePaths) -> Result<(), String> {
@@ -911,9 +1142,11 @@ fn redact_token_like_values(input: &str, needle: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_file_name, clear_local_state_on_exit_with_state_dir, default_state_dir,
+        authorize_and_connect_with_paths_and_browser, binary_file_name,
+        clear_local_state_on_exit_with_state_dir, default_state_dir,
         forget_runtime_binding_with_state_dir, parse_request_path, parse_tray_menu_action,
-        sanitize_bridge_stderr, wait_for_callback_and_open_with_browser, TrayMenuAction,
+        sanitize_bridge_stderr, sync_packaged_bridge_binary,
+        wait_for_callback_and_open_with_browser, BridgePaths, TrayMenuAction,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1275,6 +1508,203 @@ mod tests {
         assert_eq!(invocation_lines.get(11).copied(), Some("--"));
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forget_runtime_binding_continues_when_disconnect_refresh_grant_is_invalid() {
+        let temp_dir = unique_temp_dir("af-bridge-tauri-forget-invalid-grant-test");
+        let state_dir = temp_dir.join(".agent-flows-bridge");
+        let config_dir = state_dir.join("config");
+        let bin_dir = state_dir.join("bin");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+
+        let config_path = config_dir.join("bridge.json");
+        fs::write(&config_path, "{}").expect("write config");
+
+        let invocation_path = temp_dir.join("invocation.args");
+        let binary_path = bin_dir.join(binary_file_name());
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nprintf -- '--\\n' >> \"{}\"\nif [ \"$3\" = \"-disconnect-runtime\" ]; then\n  printf '%s\\n' 'disconnect runtime: refresh exchange failed: status=400 code=invalid_grant body={{\"error\":\"invalid_grant\"}}' >&2\n  exit 1\nelse\n  printf '{{\"cleared\":true}}\\n'\nfi\n",
+            invocation_path.to_string_lossy(),
+            invocation_path.to_string_lossy(),
+        );
+        fs::write(&binary_path, script).expect("write fake bridge binary");
+
+        let mut permissions = fs::metadata(&binary_path)
+            .expect("read fake bridge binary metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary_path, permissions).expect("chmod fake bridge binary");
+
+        forget_runtime_binding_with_state_dir(Some(state_dir.to_string_lossy().into_owned()))
+            .expect("forget runtime binding should clear local state");
+
+        let invocation_raw = fs::read_to_string(&invocation_path).expect("read invocation args");
+        let invocation_lines: Vec<&str> = invocation_raw.lines().collect();
+
+        assert_eq!(invocation_lines.first().copied(), Some("-config"));
+        assert_eq!(
+            invocation_lines.get(1).copied(),
+            Some(config_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            invocation_lines.get(2).copied(),
+            Some("-disconnect-runtime")
+        );
+        assert_eq!(invocation_lines.get(3).copied(), Some("--"));
+        assert_eq!(invocation_lines.get(4).copied(), Some("-config"));
+        assert_eq!(
+            invocation_lines.get(5).copied(),
+            Some(config_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            invocation_lines.get(6).copied(),
+            Some("-runtime-binding-clear")
+        );
+        assert_eq!(invocation_lines.get(7).copied(), Some("--"));
+        assert_eq!(invocation_lines.get(8).copied(), Some("-config"));
+        assert_eq!(
+            invocation_lines.get(9).copied(),
+            Some(config_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            invocation_lines.get(10).copied(),
+            Some("-oauth-clear-local-state")
+        );
+        assert_eq!(invocation_lines.get(11).copied(), Some("--"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sync_packaged_bridge_binary_replaces_stale_installed_binary() {
+        let temp_dir = unique_temp_dir("af-bridge-tauri-sync-test");
+        let state_dir = temp_dir.join(".agent-flows-bridge");
+        let config_dir = state_dir.join("config");
+        let bin_dir = state_dir.join("bin");
+        let resource_dir = temp_dir.join("resources").join("bridge");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::create_dir_all(&resource_dir).expect("create resource dir");
+
+        let config_path = config_dir.join("bridge.json");
+        fs::write(&config_path, "{}").expect("write config");
+
+        let installed_binary_path = bin_dir.join(binary_file_name());
+        fs::write(&installed_binary_path, "#!/bin/sh\necho stale\n").expect("write stale binary");
+        make_executable(&installed_binary_path);
+
+        let packaged_binary_path = resource_dir.join(binary_file_name());
+        let packaged_contents = "#!/bin/sh\necho packaged\n";
+        fs::write(&packaged_binary_path, packaged_contents).expect("write packaged binary");
+        make_executable(&packaged_binary_path);
+
+        let paths = BridgePaths {
+            state_dir,
+            config_path,
+            binary_path: installed_binary_path.clone(),
+        };
+
+        sync_packaged_bridge_binary(&paths, &packaged_binary_path)
+            .expect("sync packaged bridge binary");
+
+        let installed_contents =
+            fs::read_to_string(&installed_binary_path).expect("read synced bridge binary");
+        assert_eq!(installed_contents, packaged_contents);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn authorize_and_connect_replaces_stale_binary_before_oauth_start() {
+        let temp_dir = unique_temp_dir("af-bridge-tauri-authorize-sync-test");
+        let state_dir = temp_dir.join(".agent-flows-bridge");
+        let config_dir = state_dir.join("config");
+        let bin_dir = state_dir.join("bin");
+        let resource_dir = temp_dir.join("resources").join("bridge");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::create_dir_all(&resource_dir).expect("create resource dir");
+
+        let config_path = config_dir.join("bridge.json");
+        fs::write(&config_path, "{}").expect("write config");
+
+        let stale_invocation_path = temp_dir.join("stale.invocation");
+        let installed_binary_path = bin_dir.join(binary_file_name());
+        let stale_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nprintf -- '--\\n' >> \"{}\"\nprintf '%s\\n' 'flag provided but not defined: -oauth-redirect-port' >&2\nexit 2\n",
+            stale_invocation_path.to_string_lossy(),
+            stale_invocation_path.to_string_lossy(),
+        );
+        fs::write(&installed_binary_path, stale_script).expect("write stale binary");
+        make_executable(&installed_binary_path);
+
+        let packaged_invocation_path = temp_dir.join("packaged.invocation");
+        let packaged_binary_path = resource_dir.join(binary_file_name());
+        let packaged_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nprintf -- '--\\n' >> \"{}\"\nif [ \"$3\" = \"-oauth-start\" ]; then\n  printf '{{\"authorize_url\":\"https://agentflows.example.test/oauth/bridge/sign-in?callback_port=%s\",\"redirect_uri\":\"http://127.0.0.1:%s/oauth/callback\",\"state\":\"state-123\"}}\\n' \"$5\" \"$5\"\nelif [ \"$3\" = \"-oauth-complete-callback-url\" ]; then\n  printf '{{\"connector_id\":7,\"runtime_id\":98,\"runtime_kind\":\"local_connector\",\"scope\":\"connector:bootstrap connector:webhook\"}}\\n'\nelse\n  printf '{{}}\\n'\nfi\n",
+            packaged_invocation_path.to_string_lossy(),
+            packaged_invocation_path.to_string_lossy(),
+        );
+        fs::write(&packaged_binary_path, packaged_script).expect("write packaged binary");
+        make_executable(&packaged_binary_path);
+
+        let paths = BridgePaths {
+            state_dir,
+            config_path,
+            binary_path: installed_binary_path.clone(),
+        };
+
+        let result = authorize_and_connect_with_paths_and_browser(
+            &paths,
+            &packaged_binary_path,
+            |authorize_url| {
+                let parsed_url = url::Url::parse(authorize_url).expect("parse authorize url");
+                let callback_port = parsed_url
+                    .query_pairs()
+                    .find_map(|(key, value)| (key == "callback_port").then(|| value.into_owned()))
+                    .expect("callback port query param");
+                let port = callback_port.parse::<u16>().expect("parse callback port");
+                spawn_http_request(
+                    port,
+                    "GET /oauth/callback?code=abc&state=state-123 HTTP/1.1\r\n\r\n",
+                );
+                Ok(())
+            },
+        )
+        .expect("authorize and connect");
+
+        assert_eq!(result.connector_id, 7);
+        assert_eq!(result.runtime_id, 98);
+        assert_eq!(result.runtime_kind, "local_connector");
+        assert_eq!(result.scope, "connector:bootstrap connector:webhook");
+
+        assert!(!stale_invocation_path.exists());
+
+        let invocation_raw =
+            fs::read_to_string(&packaged_invocation_path).expect("read packaged invocation args");
+        let invocation_lines: Vec<&str> = invocation_raw.lines().collect();
+        assert_eq!(invocation_lines.first().copied(), Some("-config"));
+        assert_eq!(invocation_lines.get(2).copied(), Some("-oauth-start"));
+        assert_eq!(
+            invocation_lines.get(3).copied(),
+            Some("-oauth-redirect-port")
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &PathBuf) {
+        let mut permissions = fs::metadata(path)
+            .expect("read fake bridge binary metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod fake bridge binary");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
