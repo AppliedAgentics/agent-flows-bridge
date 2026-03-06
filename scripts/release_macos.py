@@ -454,7 +454,50 @@ def run_command(argv: Sequence[str], cwd: Path, dry_run: bool) -> None:
     subprocess.run(argv, cwd=cwd, check=True)
 
 
-def ensure_clean_repo(repo_dir: Path) -> None:
+def status_entries(status_output: str) -> list[str]:
+    return [line for line in status_output.splitlines() if line.strip()]
+
+
+def status_entry_path(entry: str) -> str:
+    path_text = entry[3:] if len(entry) > 3 else ""
+
+    if " -> " in path_text:
+        path_text = path_text.split(" -> ", 1)[1]
+
+    return path_text.rstrip("/")
+
+
+def ignored_status_prefixes(repo_dir: Path, ignored_paths: Sequence[Path] | None) -> tuple[str, ...]:
+    if not ignored_paths:
+        return ()
+
+    repo_root = repo_dir.resolve()
+    prefixes: list[str] = []
+
+    for ignored_path in ignored_paths:
+        try:
+            relative_path = ignored_path.resolve().relative_to(repo_root)
+        except ValueError:
+            continue
+
+        relative_text = relative_path.as_posix().rstrip("/")
+
+        if relative_text:
+            prefixes.append(relative_text)
+
+    return tuple(prefixes)
+
+
+def should_ignore_status_entry(entry: str, ignored_prefixes: Sequence[str]) -> bool:
+    entry_path = status_entry_path(entry)
+
+    return any(
+        entry_path == ignored_prefix or entry_path.startswith(f"{ignored_prefix}/")
+        for ignored_prefix in ignored_prefixes
+    )
+
+
+def ensure_clean_repo(repo_dir: Path, ignored_paths: Sequence[Path] | None = None) -> None:
     result = subprocess.run(
         ["git", "status", "--short"],
         cwd=repo_dir,
@@ -463,8 +506,13 @@ def ensure_clean_repo(repo_dir: Path) -> None:
         check=True,
     )
 
-    if result.stdout.strip():
-        raise RuntimeError(f"Git repo is not clean: {repo_dir}")
+    entries = status_entries(result.stdout)
+    ignored_prefixes = ignored_status_prefixes(repo_dir, ignored_paths)
+    visible_entries = [entry for entry in entries if not should_ignore_status_entry(entry, ignored_prefixes)]
+
+    if visible_entries:
+        details = "\n".join(visible_entries)
+        raise RuntimeError(f"Git repo is not clean: {repo_dir}\n{details}")
 
 
 def release_exists(repo_slug: str, version: str) -> bool:
@@ -703,7 +751,8 @@ def main() -> int:
     bundle_path = default_app_bundle_path(repo_dir)
 
     if not args.dry_run:
-        ensure_clean_repo(repo_dir)
+        ignored_repo_paths = [tap_dir] if tap_dir.is_relative_to(repo_dir) else []
+        ensure_clean_repo(repo_dir, ignored_paths=ignored_repo_paths)
         ensure_clean_repo(tap_dir)
 
     notes_path = prepare_release_notes(

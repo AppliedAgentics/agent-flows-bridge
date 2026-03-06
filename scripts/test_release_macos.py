@@ -289,6 +289,43 @@ end
             self.assertIn('"version":"0.1.1"', (repo_dir / "desktop" / "package.json").read_text())
             self.assertNotIn("2026.03.05.03", (repo_dir / "CHANGELOG.md").read_text())
 
+    def test_ensure_clean_repo_ignores_explicit_nested_checkout_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_dir = pathlib.Path(temp_dir)
+            tap_dir = repo_dir / "homebrew-tap"
+            tap_dir.mkdir(parents=True)
+            (tap_dir / "README.md").write_text("# Tap\n")
+
+            release_macos.subprocess.run(
+                ["git", "init"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            release_macos.ensure_clean_repo(repo_dir, ignored_paths=[tap_dir])
+
+    def test_ensure_clean_repo_raises_for_unignored_nested_checkout_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_dir = pathlib.Path(temp_dir)
+            tap_dir = repo_dir / "homebrew-tap"
+            tap_dir.mkdir(parents=True)
+            (tap_dir / "README.md").write_text("# Tap\n")
+
+            release_macos.subprocess.run(
+                ["git", "init"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            with self.assertRaises(RuntimeError) as raised:
+                release_macos.ensure_clean_repo(repo_dir)
+
+            self.assertIn("homebrew-tap/", str(raised.exception))
+
     def test_main_does_not_write_release_notes_before_clean_repo_check(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
