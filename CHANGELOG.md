@@ -7,6 +7,12 @@ Versioned as `YYYY.MM.DD.XX` where `XX` is a zero-padded integer increment each 
 ---
 
 
+## 2026.03.05.06
+
+### Changes
+
+- Sign the bundled Go bridge binary for notarized macOS releases
+- Verify the embedded bridge executable inside the app bundle before publishing
 ## 2026.03.05.05
 
 ### Changes
