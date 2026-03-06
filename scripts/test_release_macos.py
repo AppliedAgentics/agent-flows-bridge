@@ -326,6 +326,48 @@ end
 
             self.assertIn("homebrew-tap/", str(raised.exception))
 
+    def test_ensure_clean_repo_respects_gitignored_python_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_dir = pathlib.Path(temp_dir)
+            release_macos.subprocess.run(
+                ["git", "init"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            (repo_dir / ".gitignore").write_text("__pycache__/\n*.py[cod]\n")
+            release_macos.subprocess.run(
+                ["git", "add", ".gitignore"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            release_macos.subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "Track gitignore",
+                ],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            cache_dir = repo_dir / "scripts" / "__pycache__"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "release_macos.cpython-312.pyc").write_bytes(b"compiled")
+
+            release_macos.ensure_clean_repo(repo_dir)
+
     def test_main_does_not_write_release_notes_before_clean_repo_check(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
