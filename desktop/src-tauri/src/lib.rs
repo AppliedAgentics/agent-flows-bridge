@@ -784,6 +784,34 @@ fn parse_tray_menu_action(menu_id: &str) -> Option<TrayMenuAction> {
     }
 }
 
+fn embedded_tray_icon_asset_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "tray-icon.png"
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "icon.png"
+    }
+}
+
+fn embedded_tray_icon_bytes() -> &'static [u8] {
+    #[cfg(target_os = "macos")]
+    {
+        include_bytes!("../icons/tray-icon.png")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        include_bytes!("../icons/icon.png")
+    }
+}
+
+fn tray_icon_uses_template_rendering() -> bool {
+    cfg!(target_os = "macos")
+}
+
 // Build the macOS tray icon and menu actions for menu bar mode.
 //
 // The tray menu exposes open/sign-in/refresh/forget/quit actions and routes
@@ -866,16 +894,24 @@ fn setup_system_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         });
 
-    match tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")) {
+    match tauri::image::Image::from_bytes(embedded_tray_icon_bytes()) {
         Ok(icon) => {
             tray_builder = tray_builder.icon(icon);
         }
         Err(e) => {
-            eprintln!("failed to load embedded tray icon: {e}");
+            eprintln!(
+                "failed to load embedded tray icon {}: {e}",
+                embedded_tray_icon_asset_name()
+            );
             if let Some(icon) = app.default_window_icon().cloned() {
                 tray_builder = tray_builder.icon(icon);
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    if tray_icon_uses_template_rendering() {
+        tray_builder = tray_builder.icon_as_template(true);
     }
 
     tray_builder.build(app)?;
@@ -1203,11 +1239,11 @@ fn redact_token_like_values(input: &str, needle: &str) -> String {
 mod tests {
     use super::{
         authorize_and_connect_with_paths_and_browser, binary_file_name,
-        clear_local_state_on_exit_with_state_dir, default_state_dir,
+        clear_local_state_on_exit_with_state_dir, default_state_dir, embedded_tray_icon_asset_name,
         ensure_default_bridge_config_ready, forget_runtime_binding_with_state_dir,
         parse_request_path, parse_tray_menu_action, sanitize_bridge_stderr,
-        sync_packaged_bridge_binary, wait_for_callback_and_open_with_browser, BridgePaths,
-        TrayMenuAction,
+        sync_packaged_bridge_binary, tray_icon_uses_template_rendering,
+        wait_for_callback_and_open_with_browser, BridgePaths, TrayMenuAction,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -1324,6 +1360,26 @@ mod tests {
     fn parse_tray_menu_action_rejects_unknown_id() {
         let action = parse_tray_menu_action("unsupported-id");
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn embedded_tray_icon_asset_name_matches_platform_expectation() {
+        let asset_name = embedded_tray_icon_asset_name();
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(asset_name, "tray-icon.png");
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(asset_name, "icon.png");
+    }
+
+    #[test]
+    fn tray_icon_template_rendering_matches_platform_expectation() {
+        #[cfg(target_os = "macos")]
+        assert!(tray_icon_uses_template_rendering());
+
+        #[cfg(not(target_os = "macos"))]
+        assert!(!tray_icon_uses_template_rendering());
     }
 
     #[test]

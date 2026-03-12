@@ -1,5 +1,5 @@
 :root {
-  --color-brand: #FD4F00;
+  --color-brand: #6366F1;
   --color-accent: #6366f1;
   --color-bg: #0f1117;
   --color-bg-card: #181a20;
@@ -13,8 +13,8 @@
   --color-status-offline: #71717a;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.25);
-  --shadow-glow-brand: 0 8px 24px rgba(253, 79, 0, 0.2);
-  --ring: 0 0 0 2px rgba(253, 79, 0, 0.35);
+  --shadow-glow-brand: 0 8px 24px rgba(99, 102, 241, 0.24);
+  --ring: 0 0 0 2px rgba(99, 102, 241, 0.35);
 }
 
 * {
@@ -54,10 +54,11 @@ body {
   -webkit-app-region: no-drag;
 }
 
-.app-header-logo svg {
+.app-header-logo-mark {
   width: 22px;
   height: 22px;
   flex-shrink: 0;
+  object-fit: contain;
 }
 
 .app-header-wordmark {
@@ -74,7 +75,7 @@ body {
   align-items: center;
   padding: 2px 7px;
   border-radius: 6px;
-  background: rgba(253, 79, 0, 0.12);
+  background: rgba(99, 102, 241, 0.16);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
@@ -127,6 +128,7 @@ body {
   height: 56px;
   margin-bottom: 20px;
   opacity: 0.9;
+  object-fit: contain;
 }
 
 .hero h1 {
@@ -196,14 +198,14 @@ body {
 }
 
 .btn-primary {
-  background: linear-gradient(145deg, #FD4F00 0%, #e24500 100%);
+  background: linear-gradient(145deg, #7c7ff7 0%, #6366F1 100%);
   color: #ffffff;
   box-shadow: var(--shadow-glow-brand);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: linear-gradient(145deg, #ff5c14 0%, #FD4F00 100%);
-  box-shadow: 0 10px 30px rgba(253, 79, 0, 0.3);
+  background: linear-gradient(145deg, #8b8df8 0%, #6d70f3 100%);
+  box-shadow: 0 10px 30px rgba(99, 102, 241, 0.32);
 }
 
 .btn-secondary {
